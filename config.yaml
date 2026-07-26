@@ -1,0 +1,56 @@
+# ============================================================
+# 실험 설정. 서버 환경에 맞춰 경로/GPU만 수정하고, 실험 파라미터는 변경 금지.
+# ============================================================
+
+seed: 42                        # 모든 무작위성에 적용. 변경 금지.
+
+paths:
+  # --- 서버 환경에 맞춰 수정 ---
+  toolbench_root: "/data/toolbench"      # ToolBench(G1/G2/G3) 데이터 위치
+  output_dir: "./outputs"                # 산출물 저장 위치
+  hf_cache: "~/.cache/huggingface"       # 모델 캐시 (선택)
+  # --- 아래는 output_dir 하위로 자동 생성, 보통 수정 불필요 ---
+  data_dir: "${output_dir}/data"
+  results_dir: "${output_dir}/results"
+  models_dir: "${output_dir}/models"
+
+models:
+  embedder: "intfloat/multilingual-e5-large"   # 변경 금지 (실험 전체 동일)
+  downstream:
+    strong: "Qwen/Qwen3.5-9B"     # post-trained. Base 아님. 변경 금지.
+    weak:   "Qwen/Qwen3.5-2B"     # post-trained. Base 아님. 변경 금지.
+
+hardware:
+  device: "cuda"                  # cuda / cpu
+  dtype: "bfloat16"               # 다운스트림 추론 dtype
+  batch_size_embed: 64            # 임베딩 배치
+  batch_size_gen: 8               # 다운스트림 생성 배치 (OOM 시 축소)
+
+experiment:
+  splits: ["I1", "I2", "I3"]      # 변경 금지
+  n_queries_per_split: 300        # 변경 금지
+  tool_pool_size: 500             # 변경 금지 (gold가 더 많으면 코드가 실제값 기록)
+  n_examples_per_tool: 5          # 변경 금지
+  k_sweep: [5, 10, 20, 50]        # 변경 금지
+  leak_sim_threshold: 0.9         # example 누출 컷. 변경 금지.
+  categories: 49                  # RapidAPI category 수
+
+fusion:
+  # grid search 범위 (변경 금지). validation에서 Recall_all@10 최대화로 선택.
+  alpha_grid: [0.3, 0.5, 0.7]
+  beta_grid:  [0.3, 0.5, 0.7]
+  lambda_grid: [0.5, 1.0]
+  epsilon: 0.05                   # multiplicative floor
+  selection_metric: "recall_all@10"
+  norm_method: "zscore"           # zscore | minmax (택1 고정)
+
+decoding:
+  do_sample: false                # greedy. 결정적. 변경 금지.
+  temperature: 0.0
+  max_new_tokens: 512
+
+pilot:
+  # M5 파일럿: 소규모 사전 검증
+  split: "I1"
+  k: 10
+  parse_success_threshold: 0.90   # 이 미만이면 해당 모델 제외 (weak=2B 우선 제외)

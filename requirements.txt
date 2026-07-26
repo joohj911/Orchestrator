@@ -1,0 +1,22 @@
+# === 서버 환경 고정 (변경 금지) ===
+torch==2.5.1
+torchvision==0.20.1
+torchaudio==2.5.1
+transformers==5.5.0
+
+# === 실험 의존성 ===
+# transformers 5.5.0은 huggingface_hub>=1.0.0을 pin함 (v5 major). 아래는 그와 호환되는 범위로 설치.
+sentence-transformers>=3.0.0    # intfloat/multilingual-e5-large 로드용 (또는 transformers 직접 사용)
+numpy>=1.26,<3.0
+scipy>=1.11
+scikit-learn>=1.4               # classifier, calibration, metrics
+rank-bm25>=0.2.2                # BM25 baseline
+pandas>=2.0                     # summary.csv 집계
+pyyaml>=6.0                     # config.yaml
+tqdm>=4.66
+matplotlib>=3.8                 # 그림 1 (K sweep 곡선)
+
+# 주의:
+# - vLLM은 사용하지 않는다. downstream 추론은 transformers generate()로 수행한다.
+# - transformers v5는 v4와 breaking change가 있다 (weight loading API, httpx 백엔드,
+#   hf_xet 등). v4 관용구로 코드를 작성하지 말 것. 자세한 것은 spec/CODING_NOTES.md.
