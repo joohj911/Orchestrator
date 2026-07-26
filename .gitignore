@@ -1,0 +1,5 @@
+# Runtime artifacts (created by config loader / pipeline)
+outputs/
+__pycache__/
+*.pyc
+.smoke/
