@@ -45,39 +45,43 @@ python -m pip install -q --upgrade gdown
 # zip 유효성 검사: 할당량 초과 시 gdown 이 HTML 을 저장하므로 실제 zip 인지 확인.
 valid_zip() { [ -f "$1" ] && unzip -l "$1" >/dev/null 2>&1; }
 
-echo "[2/4] data.zip 다운로드 시도"
+echo "[2/4] data.zip 다운로드 시도 (에러는 그대로 출력하여 원인 진단)"
 ZIP=""
 
-# 전략 A: data.zip 직접 file id (원하는 것만, 최소 다운로드).
-echo "  - 전략 A: 직접 file id"
-if gdown "$FILE_ID" -O data.zip --continue 2>/dev/null && valid_zip data.zip; then
-  ZIP="data.zip"
-else
-  echo "    (실패 또는 유효하지 않은 zip)"
+# 전략 D(우선): Tsinghua Cloud 직접 다운로드 (Seafile ?dl=1). Google Drive 를 타지 않음.
+#   Google Drive 할당량/권한/차단과 무관하므로 가장 안정적. 먼저 시도.
+echo "  - 전략 D: Tsinghua Cloud 직접 다운로드"
+rm -f data.zip
+if command -v curl >/dev/null 2>&1; then
+  curl -fL "${TSINGHUA}?dl=1" -o data.zip || true
+elif command -v wget >/dev/null 2>&1; then
+  wget -O data.zip "${TSINGHUA}?dl=1" || true
 fi
+if valid_zip data.zip; then ZIP="data.zip"; else echo "    (Tsinghua 실패 또는 유효하지 않은 zip)"; fi
 
-# 전략 B: fuzzy URL 형식.
+# 전략 A: data.zip 직접 file id (Google Drive).
 if [ -z "$ZIP" ]; then
-  echo "  - 전략 B: fuzzy URL"
+  echo "  - 전략 A: Google Drive 직접 file id"
   rm -f data.zip
-  if gdown --fuzzy "https://drive.google.com/file/d/${FILE_ID}/view" -O data.zip --continue 2>/dev/null && valid_zip data.zip; then
-    ZIP="data.zip"
-  else
-    echo "    (실패)"
-  fi
+  gdown "$FILE_ID" -O data.zip --continue || true
+  if valid_zip data.zip; then ZIP="data.zip"; else echo "    (실패)"; fi
 fi
 
-# 전략 C: 폴더 다운로드 후 내부 data.zip 탐색.
+# 전략 B: fuzzy URL 형식 (Google Drive).
 if [ -z "$ZIP" ]; then
-  echo "  - 전략 C: 폴더 통째 다운로드 후 data.zip 탐색"
+  echo "  - 전략 B: Google Drive fuzzy URL"
+  rm -f data.zip
+  gdown --fuzzy "https://drive.google.com/file/d/${FILE_ID}/view" -O data.zip --continue || true
+  if valid_zip data.zip; then ZIP="data.zip"; else echo "    (실패)"; fi
+fi
+
+# 전략 C: 폴더 다운로드 후 내부 data.zip 탐색 (Google Drive).
+if [ -z "$ZIP" ]; then
+  echo "  - 전략 C: Google Drive 폴더 통째 다운로드 후 data.zip 탐색"
   rm -rf gd_folder
-  if gdown --folder "https://drive.google.com/drive/folders/${FOLDER_ID}" -O gd_folder --remaining-ok 2>/dev/null; then
-    found="$(find gd_folder -name 'data.zip' 2>/dev/null | head -1)"
-    if [ -n "$found" ] && valid_zip "$found"; then
-      ZIP="$found"
-    fi
-  fi
-  [ -z "$ZIP" ] && echo "    (실패)"
+  gdown --folder "https://drive.google.com/drive/folders/${FOLDER_ID}" -O gd_folder --remaining-ok || true
+  found="$(find gd_folder -name 'data.zip' 2>/dev/null | head -1)"
+  if [ -n "$found" ] && valid_zip "$found"; then ZIP="$found"; else echo "    (실패)"; fi
 fi
 
 if [ -z "$ZIP" ]; then
