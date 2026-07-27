@@ -13,6 +13,9 @@ paths:
   data_dir: "${output_dir}/data"
   results_dir: "${output_dir}/results"
   models_dir: "${output_dir}/models"
+  # 커밋된 자산(런타임 생성물 아님): Claude Code 가 작성한 tool example.
+  # m2 는 여기서 example 을 읽는다(tools/queries 는 data_dir 에서 읽음).
+  examples_file: "./data/tools_examples.jsonl"
 
 models:
   embedder: "intfloat/multilingual-e5-large"   # 변경 금지 (실험 전체 동일)

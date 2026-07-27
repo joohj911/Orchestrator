@@ -1,7 +1,9 @@
 # Runtime artifacts (created by config loader / pipeline)
 outputs/
-# ToolBench download (large dataset, repo-root ./data/toolbench)
-/data/
+# ToolBench download (large dataset, repo-root ./data/toolbench).
+# NOTE: only ignore the download subtree — data/tools_examples.jsonl is a
+# committed, version-controlled asset and must NOT be ignored.
+/data/toolbench/
 __pycache__/
 *.pyc
 .smoke/

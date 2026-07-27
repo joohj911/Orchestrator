@@ -77,19 +77,26 @@ def run(config_path: str) -> None:
     splits = cfg["experiment"]["splits"]
 
     tools_path = os.path.join(data_dir, "tools.jsonl")
-    examples_path = os.path.join(data_dir, "tools_examples.jsonl")
     out_path = os.path.join(data_dir, "tools_examples_checked.jsonl")
+
+    # example 은 커밋된 자산(paths.examples_file, 기본 ./data/tools_examples.jsonl).
+    # 하위호환: 지정 경로에 없으면 data_dir 에서도 찾아본다.
+    examples_path = cfg["paths"].get("examples_file", "")
+    if not (examples_path and os.path.isfile(examples_path)):
+        fallback = os.path.join(data_dir, "tools_examples.jsonl")
+        examples_path = fallback if os.path.isfile(fallback) else examples_path
 
     if not os.path.isfile(tools_path):
         print(f"[m2] tools.jsonl 없음: {tools_path}. 먼저 M1 실행.", file=sys.stderr)
         sys.exit(1)
-    if not os.path.isfile(examples_path):
+    if not (examples_path and os.path.isfile(examples_path)):
         print(
             f"[m2] tools_examples.jsonl 없음: {examples_path}.\n"
             f"     이 파일은 런타임 생성물이 아니라 Claude Code 가 작성해 레포에 커밋해야 함.",
             file=sys.stderr,
         )
         sys.exit(1)
+    print(f"[m2] example 로드: {examples_path}")
 
     tools = _read_jsonl(tools_path)
     tool_ids = {t["id"] for t in tools}
