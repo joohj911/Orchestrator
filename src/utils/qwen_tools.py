@@ -14,11 +14,25 @@
   - Qwen3.5 chat_template.jinja / 모델카드 포맷을 근거로 구현.
 구현: Claude Code
 
-# DECISION NEEDED: 정확한 tool_call 마커/포맷은 설치된 Qwen3.5 tokenizer 의
-#   chat_template.jinja 로 최종 확인해야 한다(현재 환경에서 모델 접근 불가).
-#   CODING_NOTES 의 예시(<tool_call>{json}</tool_call>)를 1차 포맷으로 구현하고,
-#   qwen3_coder 계열의 <function=..><parameter=..> XML 포맷을 폴백으로 함께 처리해
-#   포맷 확인 전에도 방어적으로 동작하게 한다. 확정되면 불필요한 폴백을 제거할 것.
+# 포맷 확인 (2026-07, 웹 확인 완료):
+#   Qwen3.5 는 Qwen3(Hermes JSON)와 tool-call 포맷이 다르다. Qwen3.5 는 Qwen3-Coder
+#   XML 포맷으로 학습됐다 (parser: qwen3_coder / qwen3_xml). 실제 생성 문자열:
+#       <tool_call>
+#       <function=func_name>
+#       <parameter=key>
+#       value
+#       </parameter>
+#       </function>
+#       </tool_call>
+#   따라서 이 실험(Qwen3.5-9B/2B)의 1차 포맷은 XML 이다. CODING_NOTES 의 JSON 예시는
+#   Qwen3 기준이었다.
+#   - 파서는 XML 을 우선 시도하고, Hermes JSON 을 호환 폴백으로 함께 처리한다.
+#     (긴 컨텍스트(>~65K)에서 XML/JSON 이 섞여 나오는 알려진 이슈가 있어 이중 파싱이
+#      단순 방어가 아니라 견고성 이득이다.)
+#   - 최종 근거는 설치된 Qwen3.5 tokenizer 의 chat_template.jinja 이며, 서버에서
+#     M5 파싱 성공률로 실측 검증된다.
+#   근거: QwenLM/Qwen3-Coder tool-call 포맷 문서, vLLM qwen3_coder/qwen3_xml 파서,
+#         Qwen3.5 chat-template-fix 논의.
 """
 from __future__ import annotations
 
@@ -119,9 +133,10 @@ def classify_generation(generated_text: str) -> dict[str, Any]:
     calls: list[dict[str, Any]] = []
     any_malformed = False
     for block in blocks:
-        call = _parse_json_block(block)
+        # Qwen3.5 = Qwen3-Coder XML 이 학습 포맷 → 우선 시도.
+        call = _parse_xml_block(block)
         if call is None:
-            call = _parse_xml_block(block)  # qwen3_coder 폴백
+            call = _parse_json_block(block)  # Hermes JSON 호환 폴백.
         if call is None:
             any_malformed = True
             continue
