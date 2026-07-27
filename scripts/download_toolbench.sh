@@ -67,19 +67,12 @@ if [ -z "$ZIP" ]; then
   if valid_zip data.zip; then ZIP="data.zip"; else echo "    (실패)"; fi
 fi
 
-# 전략 B: fuzzy URL 형식 (Google Drive).
-if [ -z "$ZIP" ]; then
-  echo "  - 전략 B: Google Drive fuzzy URL"
-  rm -f data.zip
-  gdown --fuzzy "https://drive.google.com/file/d/${FILE_ID}/view" -O data.zip --continue || true
-  if valid_zip data.zip; then ZIP="data.zip"; else echo "    (실패)"; fi
-fi
-
 # 전략 C: 폴더 다운로드 후 내부 data.zip 탐색 (Google Drive).
+#   (gdown 6.1.0 은 --fuzzy/--remaining-ok 미지원이라 해당 전략은 제거함.)
 if [ -z "$ZIP" ]; then
   echo "  - 전략 C: Google Drive 폴더 통째 다운로드 후 data.zip 탐색"
   rm -rf gd_folder
-  gdown --folder "https://drive.google.com/drive/folders/${FOLDER_ID}" -O gd_folder --remaining-ok || true
+  gdown --folder "https://drive.google.com/drive/folders/${FOLDER_ID}" -O gd_folder || true
   found="$(find gd_folder -name 'data.zip' 2>/dev/null | head -1)"
   if [ -n "$found" ] && valid_zip "$found"; then ZIP="$found"; else echo "    (실패)"; fi
 fi
