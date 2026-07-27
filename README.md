@@ -80,6 +80,14 @@ outputs/
 
 `results/summary.csv`가 최종 결과표. 컬럼: split, model, candidate_scope, retrieval_method, prior_source, K, recall_all, func_acc, arg_acc, completeness, mean_prompt_tokens, n_queries.
 
+## 데이터 한계 (알려진 것, 결론에 명기)
+- ToolBench 는 RapidAPI 스크랩 기반이라 pool 에 **test/placeholder API**가 섞여 있고
+  (`scripts/flag_tool_quality.py` 진단상 clearly_junk ≈ 20/500, 메타 결측 ≈ 35/500),
+  일부 query↔gold 매핑에 **의미적 노이즈**가 있다(gold 는 ChatGPT DFSDT 해답 경로 유래).
+- 이는 표준 벤치마크의 고유 속성으로, pool·gold 를 임의 수정하지 않는다(재현성·공신력).
+  노이즈는 전 조건에 균일하게 작용하므로 **상대 비교는 유효**하며, 절대값의 천장만 낮아진다.
+- `tool_quality.jsonl` 은 **진단·보고 전용**이며 retrieval/scoring 에 사용하지 않는다.
+
 ## 무결성 규칙 (위반 시 결과 무효)
 - 정답 누출 금지: test 쿼리가 example 생성/classifier 학습/fusion 계수 선택에 새어들면 안 됨.
 - seed=42, greedy 디코딩 고정.
