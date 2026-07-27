@@ -25,7 +25,17 @@ pip install -r requirements.txt
 **transformers v5는 v4와 breaking change가 있음** — `spec/CODING_NOTES.md` 반드시 확인.
 
 ### 사전 요건
-- **ToolBench 데이터 다운로드** (공식 OpenBMB/ToolBench `data.zip`):
+- **ToolBench 데이터 다운로드** — 두 경로 중 하나:
+  - **(권장, 사내 프록시 환경) HuggingFace 미러에서 준비**: Google Drive/Tsinghua 가
+    DLP 프록시에 막히는 환경에서는 HF(`tuandunghcmut/toolbench-v1` benchmark)를 쓴다.
+    ```bash
+    pip install -q datasets
+    python scripts/prepare_toolbench_hf.py --dest ./data/toolbench
+    ```
+    → `./data/toolbench/data/test_instruction/G{1,2,3}_instruction.json` 생성.
+    스크립트가 split별 개수·multi-tool 수를 출력하니, 그에 맞춰
+    `config.yaml` 의 `experiment.n_queries_per_split` 를 조정한다(아래 참고).
+  - **(원본) 공식 data.zip**: 클라우드 스토리지 접근이 가능한 환경:
   ```bash
   bash scripts/download_toolbench.sh ./data/toolbench   # DEST 기본 ./data/toolbench
   ```
