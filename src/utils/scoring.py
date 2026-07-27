@@ -78,20 +78,29 @@ def score_args(
 ) -> float:
     """인자 정확도.
 
-    올바른 함수 호출(gold 함수명과 일치)에 대해, gold 가 명시한 필수 인자 값이
-    호출 인자와 일치하는 비율. = (정확히 채운 필수 인자) / (필수 인자), gold 호출 평균.
+    올바른 함수 호출(gold 함수명과 일치)에 대해, **스키마상 필수(required) 인자** 값이
+    gold 와 일치하는 비율. = (정확히 채운 필수 인자) / (필수 인자), gold 호출 평균.
+    (scoring.md: "필수 파라미터 값이 gold와 일치".)
 
-    입력: called/gold 는 [{name, arguments: {k: v}}, ...].
-    gold 의 arguments 키를 '필수 인자'로 본다 (ToolBench gold_api 의 정답 인자).
+    입력 구조:
+      called: [{name, arguments: {k: v}}, ...]  (모델이 실제로 호출한 것)
+      gold:   [{name, arguments: {k: v}, required: [param, ...]}, ...]
+        - arguments: 정답 인자 값(옵션 인자 포함 가능).
+        - required : 그 tool 의 스키마상 필수 파라미터명 목록. 채점 분모.
+          m5/m6 가 tools.jsonl 의 params[].required 로부터 채워 넘긴다.
 
-    # DECISION NEEDED: gold.arguments 의 키 전체를 필수 인자로 간주한다.
-    #   근거: ToolBench gold 는 정답 호출의 인자 값을 담는다. 별도 required 플래그가
-    #   gold 레코드에 없으므로 "정답이 값을 준 인자 = 채워야 할 필수 인자"로 본다.
-    #   tools.jsonl 의 스키마 required 와 다를 수 있어, 채점 기준은 gold 값 기준으로 고정.
-    #
-    # DECISION NEEDED: LLM judge 는 기본 미사용(use_llm_judge=False)이고, 사용 시
-    #   그 사실을 결과에 기록한다. 채점 유틸은 외부 모델 의존을 두지 않는다(조건 격리).
-    #   애매한 자유텍스트 인자는 정규화 비교까지만 수행한다.
+    채점 기준 (확정됨):
+      - 분모 = required ∩ gold.arguments.keys()
+        (스키마상 필수이면서 gold 가 정답 값을 준 인자만. gold 는 실행 가능한 정답이라
+         보통 필수를 모두 담지만, 참조 값이 없는 필수는 검증 불가라 제외한다.)
+      - 옵션 인자는 gold 가 값을 줬어도 채점하지 않는다(실행에 강제되지 않으므로).
+      - required 키가 gold 에 없으면(= 호환용 폴백) gold.arguments 전체를 분모로 쓴다.
+        이 경우 옵션까지 포함되니, 정식 실행에서는 required 를 반드시 넘길 것.
+
+    # DECISION NEEDED (확정): 분모=스키마 required (사람 확인 완료, 옵션 제외).
+    # DECISION NEEDED: LLM judge 는 기본 미사용(use_llm_judge=False), 사용 시 결과에 기록.
+    #   채점 유틸은 외부 모델 의존을 두지 않는다(조건 격리). 애매한 자유텍스트 인자는
+    #   정규화 비교까지만 수행한다.
     """
     if use_llm_judge:
         # 채점 유틸 자체는 LLM 을 호출하지 않는다. 필요 시 호출측에서 판정을 주입하고
@@ -110,8 +119,15 @@ def score_args(
     for g in gold:
         gname = g["name"]
         gold_args = g.get("arguments", {}) or {}
-        if not gold_args:
-            # 필수 인자가 없으면 인자 채점 대상이 아님(분모 0) → 건너뜀.
+        required = g.get("required")
+        if required is None:
+            # 폴백: required 정보 미제공 시 gold 인자 전체를 채점(스모크/구버전 호출).
+            req_keys = list(gold_args.keys())
+        else:
+            # (b) 스키마 필수 ∩ gold 가 참조 값을 준 인자.
+            req_keys = [k for k in required if k in gold_args]
+        if not req_keys:
+            # 채점할 필수 인자가 없음(분모 0) → 이 gold 호출은 arg 채점 대상 아님.
             continue
         called_args = called_by_name.get(gname)
         if called_args is None:
@@ -119,9 +135,9 @@ def score_args(
             per_call_scores.append(0.0)
             continue
         correct = sum(
-            1 for k, gv in gold_args.items() if k in called_args and _args_match(called_args[k], gv)
+            1 for k in req_keys if k in called_args and _args_match(called_args[k], gold_args[k])
         )
-        per_call_scores.append(correct / len(gold_args))
+        per_call_scores.append(correct / len(req_keys))
 
     if not per_call_scores:
         return 0.0

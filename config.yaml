@@ -49,6 +49,14 @@ decoding:
   temperature: 0.0
   max_new_tokens: 512
 
+prompt:
+  # 다운스트림 생성 시 주입하는 고정 system 프롬프트.
+  # 무결성 규칙(조건 격리): 전 조건(full/random/retrieved/oracle)·전 모델(2B/9B)에
+  # 동일하게 적용된다. 바뀌는 것은 candidate tool 목록뿐. 변경 시 전체 재실행 필요.
+  # 정답을 흘리거나 특정 조건만 다르게 주면 안 된다. tool 사용을 유도하는 중립 문구만.
+  # null 로 두면 system 프롬프트 없이 chat_template 의 기본 tool 지시만 사용.
+  system_instruction: "You have access to a set of tools. Use the appropriate tool(s) with the correct arguments to fulfill the user's request."
+
 pilot:
   # M5 파일럿: 소규모 사전 검증
   split: "I1"

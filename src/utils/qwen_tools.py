@@ -1,9 +1,10 @@
 """Qwen3.5 tool-call 프롬프트 구성 + 파싱 (vLLM 파서 미사용).
 
 계약:
-  build_prompt(tokenizer, query, tool_schemas) -> str
+  build_prompt(tokenizer, query, tool_schemas, system_prompt=None) -> str
     # tokenizer.apply_chat_template(messages, tools=tool_schemas,
     #                               add_generation_prompt=True, tokenize=False)
+    # system_prompt: config.prompt.system_instruction (전 조건·전 모델 공통 고정).
   parse_tool_calls(generated_text) -> (calls: list[{name, arguments}], parse_ok: bool)
     # Qwen3.5 chat_template 의 tool_call 포맷을 직접 파싱.
     # 파싱 실패(포맷 위반/JSON 깨짐)는 예외로 흘리지 말고 parse_ok=False 로 반환.
@@ -48,21 +49,33 @@ _FUNCTION_RE = re.compile(r"<function=([^>\s]+)\s*>(.*?)</function>", re.DOTALL)
 _PARAMETER_RE = re.compile(r"<parameter=([^>\s]+)\s*>(.*?)</parameter>", re.DOTALL)
 
 
-def build_prompt(tokenizer, query: str, tool_schemas: list[dict[str, Any]]):
+def build_prompt(
+    tokenizer,
+    query: str,
+    tool_schemas: list[dict[str, Any]],
+    system_prompt: str | None = None,
+):
     """chat template 로 프롬프트 문자열을 만든다 (tokenize=False).
 
     조건 간 동일성(무결성 규칙 2)을 위해 바뀌는 것은 tool_schemas 뿐이다.
-    system 프롬프트를 별도로 주입하지 않는다 — tool 사용 지시는 chat_template 이
-    tools= 로부터 생성한다.
 
-    # DECISION NEEDED: messages=[{"role":"user","content":query}] 만 사용.
-    #   근거: 조건 격리(프롬프트 고정, tool 목록만 변동). 추가 system 지시를 넣으면
-    #   조건 간 동일성이 흔들리고 모델별 튜닝이 개입될 수 있어 배제한다.
+    system_prompt:
+      config.prompt.system_instruction 값을 그대로 넘긴다. 전 조건(full/random/
+      retrieved/oracle)·전 모델(2B/9B)에 **동일하게** 적용되는 고정 문구여야 한다.
+      호출측(m5/m6)이 조건마다 다르게 주면 조건 격리가 깨지므로 금지.
+      None/빈 문자열이면 system 메시지를 넣지 않고 chat_template 의 기본 tool 지시만
+      사용한다.
+      (tool 사용 지시 자체는 chat_template 이 tools= 로부터도 생성하지만, 특히 약한
+       2B 가 호출 대신 직접 답하는 no_call 을 줄이려면 명시적 중립 지시가 도움이 된다.
+       M5 파싱/no_call 리포트가 이 문구의 효과를 실측 검증한다.)
 
     반환: 렌더된 프롬프트 문자열. 배치/토크나이즈는 호출측(m5/m6)이 담당해
     padding·디코딩 파라미터를 조건 간 동일하게 통제한다.
     """
-    messages = [{"role": "user", "content": query}]
+    messages: list[dict[str, str]] = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": query})
     return tokenizer.apply_chat_template(
         messages,
         tools=tool_schemas,
