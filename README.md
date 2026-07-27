@@ -27,10 +27,11 @@ pip install -r requirements.txt
 ### 사전 요건
 - **ToolBench 데이터 다운로드** (공식 OpenBMB/ToolBench `data.zip`):
   ```bash
-  bash scripts/download_toolbench.sh /data/toolbench   # DEST 기본 /data/toolbench
+  bash scripts/download_toolbench.sh ./data/toolbench   # DEST 기본 ./data/toolbench
   ```
-  결과로 `/data/toolbench/data/test_instruction/G{1,2,3}_instruction.json` 이 생기고,
-  `config.yaml`의 `paths.toolbench_root=/data/toolbench` 로 그대로 인식된다.
+  결과로 `./data/toolbench/data/test_instruction/G{1,2,3}_instruction.json` 이 생기고,
+  `config.yaml`의 `paths.toolbench_root=./data/toolbench` 로 그대로 인식된다.
+  (DEST 와 `toolbench_root` 는 **반드시 같은 경로**여야 한다.)
   (Drive 할당량 초과 시 스크립트가 Tsinghua Cloud 대안을 안내. data.zip 은 대용량.)
   - M1 은 각 쿼리의 `api_list`(tool 메타)와 `relevant APIs`(gold)만 사용 → **RapidAPI 키 불필요**
     (이 실험 채점은 실제 API 실행이 아니라 매칭 기반).

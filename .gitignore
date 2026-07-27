@@ -1,5 +1,7 @@
 # Runtime artifacts (created by config loader / pipeline)
 outputs/
+# ToolBench download (large dataset, repo-root ./data/toolbench)
+/data/
 __pycache__/
 *.pyc
 .smoke/

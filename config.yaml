@@ -6,7 +6,7 @@ seed: 42                        # 모든 무작위성에 적용. 변경 금지.
 
 paths:
   # --- 서버 환경에 맞춰 수정 ---
-  toolbench_root: "/data/toolbench"      # ToolBench(G1/G2/G3) 데이터 위치
+  toolbench_root: "./data/toolbench"     # ToolBench(G1/G2/G3) 데이터 위치. download 스크립트 DEST 와 일치시킬 것.
   output_dir: "./outputs"                # 산출물 저장 위치
   hf_cache: "~/.cache/huggingface"       # 모델 캐시 (선택)
   # --- 아래는 output_dir 하위로 자동 생성, 보통 수정 불필요 ---

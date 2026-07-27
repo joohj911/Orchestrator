@@ -4,7 +4,7 @@
 #
 # 사용법:
 #   bash scripts/download_toolbench.sh [DEST]
-#   DEST 기본값 = /data/toolbench  (config.yaml 의 paths.toolbench_root 와 일치)
+#   DEST 기본값 = ./data/toolbench  (config.yaml 의 paths.toolbench_root 와 일치시킬 것)
 #
 # 결과: DEST/data/test_instruction/G{1,2,3}_instruction.json 이 생성된다.
 #   m1_data_prep.py 는 {toolbench_root}/data/test_instruction/... 를 자동 탐색하므로,
@@ -21,7 +21,7 @@
 # ============================================================
 set -euo pipefail
 
-DEST="${1:-/data/toolbench}"
+DEST="${1:-./data/toolbench}"
 FILEID="1XFjDxVZdUY7TXYF2yvzx3pJlS2fy78jk"   # 공식 data.zip (ToolBench README)
 
 mkdir -p "$DEST"
