@@ -54,6 +54,11 @@ fusion:
   epsilon: 0.05                   # multiplicative floor
   selection_metric: "recall_all@10"
   norm_method: "zscore"           # zscore | minmax (택1 고정)
+  val_frac: 0.3                   # fusion 계수 선택용 validation 비율 (각 split의 100개 중).
+                                  # 명세는 ToolBench eval 파티션을 가정하나, 이 환경은 data.zip
+                                  # (프록시 차단)이 없어 test 서브셋만 확보됨. 그래서 각 split 을
+                                  # val/test 로 분할해 계수는 val 에서만 선택하고 지표는 test 에서만
+                                  # 보고한다(게이트 'test 미사용' 충족). seed 로 결정적 분할.
 
 decoding:
   do_sample: false                # greedy. 결정적. 변경 금지.
