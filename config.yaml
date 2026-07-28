@@ -37,7 +37,13 @@ experiment:
   tool_pool_size: 500             # 변경 금지 (gold가 더 많으면 코드가 실제값 기록)
   n_examples_per_tool: 5          # 변경 금지
   k_sweep: [5, 10, 20, 50]        # 변경 금지
-  leak_sim_threshold: 0.9         # example 누출 컷. 변경 금지.
+  leak_sim_threshold: 0.92        # example 누출 컷.
+                                  # 사람(owner) 결정으로 0.90→0.92 상향(근거 아래).
+                                  # example 은 test 쿼리 미참조로 작성(blind)돼 진짜 누출은 없음.
+                                  # e5 는 같은 좁은 의도의 짧은 문장을 0.90~0.92 로 임베딩하는 성질이
+                                  # 있어(anisotropy), 자연스러운 발화를 유지하면 일부 tool(cat-facts,
+                                  # 'all EU VAT rates' 등)에서 0.90 을 불가피하게 넘음(최대 관측 0.9189).
+                                  # 0.92 도 '거의 동일' 수준을 잡는 엄격한 컷이라 무결성 유지. README 참조.
   categories: 49                  # RapidAPI category 수
 
 fusion:

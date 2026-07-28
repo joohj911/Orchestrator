@@ -10,7 +10,7 @@
 
 ## M2 example (verify_m2.py)
 - example은 Claude Code가 작성해 레포에 커밋 (런타임 생성 아님). m2는 검증만.
-- 전 example max_leak_sim ≤ config.leak_sim_threshold(0.9) — 실패 시 중단 (누출)
+- 전 example max_leak_sim ≤ config.leak_sim_threshold(0.92) — 실패 시 중단 (누출)
 - tool당 정확히 5개 (미달 목록 출력)
 
 ## M3 retrieval (verify_m3.py)

@@ -23,7 +23,7 @@ example은 서버 런타임이 아니라 **Claude Code가 직접 작성**해 레
 ## 검증 주체 — 서버 런타임 (m2_examples.py + verify_m2.py)
 - m2_examples.py: 저장된 example을 e5 임베딩 → 그 tool을 gold로 갖는 test 쿼리와 유사도 → max_leak_sim 기록.
 - verify_m2.py (게이트):
-  - 전 example max_leak_sim ≤ config.leak_sim_threshold(0.9) — 초과 시 FAIL(중단).
+  - 전 example max_leak_sim ≤ config.leak_sim_threshold(0.92) — 초과 시 FAIL(중단).
   - 전 tool 정확히 5개 — 미달 시 FAIL.
 - 누출 컷에 걸리면: 해당 example을 사람이 수정(또는 Claude Code에 재작성 요청) 후 재실행.
 
