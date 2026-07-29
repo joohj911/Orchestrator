@@ -220,17 +220,23 @@ def train_lora(texts_tr, Y_tr, texts_val, Y_val, test_texts_by_split, model_id, 
     bs, n = int(lc["batch_size"]), len(texts_tr)
     best_val, best_state, patience = float("inf"), None, 0
     rng = np.random.default_rng(seed)
+    steps_per_epoch = (n + bs - 1) // bs
+    log_every = max(1, steps_per_epoch // 10)  # epoch당 ~10회 진행 로그 (대용량 train 가시성)
     for epoch in range(int(lc["epochs"])):
         order = rng.permutation(n)
-        for i in range(0, n, bs):
+        for step, i in enumerate(range(0, n, bs)):
             idx = order[i:i + bs]
             opt.zero_grad()
             logits = encode([texts_tr[j] for j in idx], True)
-            loss_fn(logits, Yt[idx]).backward()
+            loss = loss_fn(logits, Yt[idx])
+            loss.backward()
             opt.step()
+            if (step + 1) % log_every == 0:
+                print(f"[m4/lora] epoch {epoch+1} step {step+1}/{steps_per_epoch} "
+                      f"loss {round(float(loss.item()), 4)}", flush=True)
         with torch.no_grad():
             vloss = loss_fn(torch.tensor(logits_np(texts_val), device=device), Yv).item()
-        print(f"[m4/lora] epoch {epoch+1} val_bce {round(vloss,4)}")
+        print(f"[m4/lora] epoch {epoch+1} val_bce {round(vloss,4)}", flush=True)
         if vloss < best_val - 1e-5:
             best_val, patience = vloss, 0
             best_state = {"lora": {k: v.cpu().clone() for k, v in get_peft_model_state_dict(enc).items()},
