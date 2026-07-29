@@ -18,7 +18,8 @@
 
 ### 축 A — candidate 범위 (프롬프트에 넣는 tool 집합)
 - full: pool 500 전부 (하한, 좁히기 안 함)
-- random_k: 무작위 K (정답 강제 포함) — 하한
+- random_k: 순수 무작위 K, 정답 포함 보장 없음 — 하한 (신호 없는 좁히기).
+  (수정 2026-07: 기존 "정답 강제 포함" 문구는 oracle_tool 과 동일 조건이 되어 하한 역할 불가 — 파일럿 실측으로 확인 후 정정)
 - retrieved_k: retrieval로 좁힌 K — 측정 대상
 - oracle_tool: 정답 tool + distractor로 K — 상한 (완벽한 retrieval)
 

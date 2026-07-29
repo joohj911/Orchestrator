@@ -71,11 +71,11 @@ def build_candidates(condition, query_id, gold_ids, all_ids, retrieved, k, rng):
     if condition == "full":
         return list(all_ids)
     if condition == "random_k":
-        pool = [t for t in all_ids if t not in set(gold_ids)]
+        # 순수 무작위 K개 — gold 포함 보장 없음 ("신호 없는 좁히기" 하한).
+        # 정답을 강제 포함하면 oracle_tool 과 동일 조건이 되어 하한 역할을 못 한다
+        # (2026-07 파일럿 실측으로 확인, PLAN.md 축 A 문구도 함께 수정).
         rng2 = random.Random(_stable_seed(query_id, "rand"))
-        distract = rng2.sample(pool, max(0, min(k - len(gold_ids), len(pool))))
-        cand = list(dict.fromkeys(list(gold_ids) + distract))
-        return cand[:max(k, len(gold_ids))]
+        return rng2.sample(list(all_ids), min(k, len(all_ids)))
     if condition == "oracle_tool":
         pool = [t for t in all_ids if t not in set(gold_ids)]
         rng2 = random.Random(_stable_seed(query_id, "oracle"))
