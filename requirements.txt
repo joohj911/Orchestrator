@@ -10,6 +10,7 @@ sentence-transformers>=3.0.0    # intfloat/multilingual-e5-large 로드용 (또�
 numpy>=1.26,<3.0
 scipy>=1.11
 scikit-learn>=1.4               # classifier, calibration, metrics
+peft>=0.11                      # M4 classifier LoRA 미세조정 (config.classifier.method=lora)
 rank-bm25>=0.2.2                # BM25 baseline
 pandas>=2.0                     # summary.csv 집계
 pyyaml>=6.0                     # config.yaml
