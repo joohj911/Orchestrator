@@ -15,6 +15,13 @@ CLI: python m5_pilot.py --config config.yaml [--force] [--smoke]
 
 # DECISION: arg_acc 는 gold 인자 값이 데이터에 없어 null 로 둔다(파일럿은 파싱·방향 확인 목적).
 #   func_acc/completeness/miss_type/parse_ok/prompt_tokens 는 gold_tools 로 계산.
+
+retriever 영향 귀속 (pilot_report.json 에 포함):
+  - per_condition_metrics: 조건별 func_acc/completeness/recall_all/miss_type 집계.
+  - retrieval_effect: retrieved_* 조건마다
+      vs_full / vs_random_k — 같은 쿼리 짝 비교 Δfunc_acc + 도움/해악 쿼리 수
+      func_acc_given_recall_hit/miss — retriever 성공/실패 시 downstream 조건부 성능.
+    (조건 간 프롬프트·디코딩 동일, candidate 만 다르므로 이 짝 비교가 retriever 의 인과 효과.)
 """
 from __future__ import annotations
 
@@ -29,7 +36,7 @@ from typing import Any
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from utils.config import load_config  # noqa: E402
 from utils.qwen_tools import build_prompt, parse_tool_calls, classify_generation, sanitize_name, to_openai_schema  # noqa: E402
-from utils.scoring import score_func, score_completeness  # noqa: E402
+from utils.scoring import score_func, score_completeness, recall_all  # noqa: E402
 
 # 축 A 조건 + 축 B 방법 (retrieved_k 에 적용). fusion 은 M3 에서 oracle prior.
 RETRIEVAL_METHODS = ["bm25", "dense_single", "dense_multi", "fusion_add_oracle", "fusion_mult_oracle"]
@@ -94,11 +101,77 @@ class QwenRunner:
         return len(self.tok(prompt).input_ids)
 
 
+def _aggregate(recs):
+    """조건별 요약: 방향 확인용 (파일럿 게이트는 파싱 성공률이지만, retriever 영향도 리포트)."""
+    n = len(recs)
+    if not n:
+        return {}
+    miss_counts = Counter(r["miss_type"] for r in recs if r["miss_type"])
+    return {
+        "n": n,
+        "func_acc": round(sum(r["func_acc"] for r in recs) / n, 4),
+        "completeness": round(sum(r["completeness"] for r in recs) / n, 4),
+        "recall_all": round(sum(r["recall_all"] for r in recs) / n, 4),
+        "mean_prompt_tokens": round(sum(r["prompt_tokens"] for r in recs) / n, 1),
+        "miss_type_counts": dict(miss_counts),
+    }
+
+
+def _retrieval_effect(recs_by_cond):
+    """retrieved_* 조건별 retriever 영향 귀속.
+
+    같은 쿼리·같은 모델·같은 프롬프트에서 candidate 목록만 다르므로 baseline 과의
+    쿼리 단위 짝 비교가 retriever 의 인과 효과다.
+      - vs_full     : retriever 를 껴서 좋아졌나/나빠졌나 (좁히기+랭킹 합산 효과).
+      - vs_random_k : 단순 좁히기 대비 retriever 랭킹의 기여.
+      - func_acc_given_recall_hit/miss : retriever 가 gold 를 살렸을 때 모델이 잘 쓰는지,
+        놓쳤을 때 downstream 이 같이 죽는지 (원인 귀속).
+    """
+    effects = {}
+    baselines = {b: {str(r["query_id"]): r for r in recs_by_cond.get(b, [])}
+                 for b in ("full", "random_k")}
+    for cond, recs in recs_by_cond.items():
+        if not cond.startswith("retrieved_") or not recs:
+            continue
+        hit = [r for r in recs if r["recall_all"] == 1]
+        miss = [r for r in recs if r["recall_all"] == 0]
+        eff = {
+            "recall_all": round(len(hit) / len(recs), 4),
+            "func_acc_given_recall_hit": round(sum(r["func_acc"] for r in hit) / len(hit), 4) if hit else None,
+            "func_acc_given_recall_miss": round(sum(r["func_acc"] for r in miss) / len(miss), 4) if miss else None,
+        }
+        for bname, base in baselines.items():
+            if not base:
+                continue
+            helped = hurt = 0
+            deltas = []
+            for r in recs:
+                br = base.get(str(r["query_id"]))
+                if br is None:
+                    continue
+                d = r["func_acc"] - br["func_acc"]
+                deltas.append(d)
+                if d > 0:
+                    helped += 1
+                elif d < 0:
+                    hurt += 1
+            if deltas:
+                eff[f"vs_{bname}"] = {
+                    "delta_func_acc": round(sum(deltas) / len(deltas), 4),
+                    "helped_queries": helped,
+                    "hurt_queries": hurt,
+                    "unchanged_queries": len(deltas) - helped - hurt,
+                }
+        effects[cond] = eff
+    return effects
+
+
 def run_model(runner, model_key, cfg, tools_by_id, all_ids, queries, retrieved, conditions, k,
               system_prompt, out_dir, split, tok_for_schema=None):
     """한 모델에 대해 전 조건×쿼리 실행, 파일 기록, 파싱 상태 집계 반환."""
     status_counter = Counter()
     per_cond_status = {}
+    recs_by_cond = {}
     gold_by_q = {str(q["query_id"]): list(q["gold_tools"]) for q in queries}
 
     for cond in conditions:
@@ -125,9 +198,11 @@ def run_model(runner, model_key, cfg, tools_by_id, all_ids, queries, retrieved, 
                 "query_id": q["query_id"], "condition": cond, "n_candidates": len(cand_ids),
                 "called_tools": called_ids, "parse_ok": parse_ok, "gen_status": status,
                 "func_acc": fa, "arg_acc": None, "completeness": comp, "miss_type": miss,
+                "recall_all": recall_all(cand_ids, gold),
                 "prompt_tokens": runner.prompt_tokens(prompt),
             })
         per_cond_status[cond] = dict(cstat)
+        recs_by_cond[cond] = recs
         out = os.path.join(out_dir, f"downstream_pilot_{model_key}_{cond}_K{k}.jsonl")
         with open(out, "w", encoding="utf-8") as f:
             for r in recs:
@@ -136,7 +211,9 @@ def run_model(runner, model_key, cfg, tools_by_id, all_ids, queries, retrieved, 
     total = sum(status_counter.values())
     parse_rate = status_counter["ok"] / total if total else 0.0
     return {"model_id": runner.model_id, "n": total, "parse_rate": round(parse_rate, 4),
-            "status_counts": dict(status_counter), "per_condition_status": per_cond_status}
+            "status_counts": dict(status_counter), "per_condition_status": per_cond_status,
+            "per_condition_metrics": {c: _aggregate(r) for c, r in recs_by_cond.items()},
+            "retrieval_effect": _retrieval_effect(recs_by_cond)}
 
 
 def run(config_path, force, runner_factory=None):
@@ -178,6 +255,15 @@ def run(config_path, force, runner_factory=None):
             system_prompt, results_dir, split)
         r = report["models"][model_key]
         print(f"[m5] {model_key} 파싱 성공률 {r['parse_rate']} (상태 {r['status_counts']})")
+        for cond, m in r["per_condition_metrics"].items():
+            print(f"[m5]   {cond}: func_acc {m.get('func_acc')} comp {m.get('completeness')} "
+                  f"recall_all {m.get('recall_all')} miss {m.get('miss_type_counts')}")
+        for cond, eff in r["retrieval_effect"].items():
+            vf = eff.get("vs_full", {})
+            print(f"[m5]   [효과] {cond}: Δfunc_acc(vs full) {vf.get('delta_func_acc')} "
+                  f"(도움 {vf.get('helped_queries')} / 해악 {vf.get('hurt_queries')}), "
+                  f"recall hit/miss 시 func_acc {eff.get('func_acc_given_recall_hit')}/"
+                  f"{eff.get('func_acc_given_recall_miss')}")
 
     with open(os.path.join(results_dir, "pilot_report.json"), "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
@@ -230,8 +316,20 @@ def _smoke():
     rep = json.load(open(f"{d}/out/results/pilot_report.json"))
     assert rep["models"]["weak"]["parse_rate"] == 1.0, rep["models"]["weak"]
     assert rep["models"]["strong"]["n"] == len(rep["conditions"]) * 4
-    # func_acc: mock 이 첫 candidate 호출. full 조건에서 첫 tool 이 gold 면 1.
-    print(f"[smoke] OK — 조건 {len(rep['conditions'])}, parse_rate {rep['models']['weak']['parse_rate']}")
+    # retriever 영향 리포트: 조건별 집계 + retrieved_* 의 baseline 짝 비교가 있어야 함.
+    pcm = rep["models"]["weak"]["per_condition_metrics"]
+    assert set(pcm) == set(rep["conditions"]) and all("recall_all" in m for m in pcm.values()), pcm
+    eff = rep["models"]["weak"]["retrieval_effect"]
+    assert eff and all(c.startswith("retrieved_") for c in eff), eff
+    e0 = next(iter(eff.values()))
+    assert "vs_full" in e0 and "vs_random_k" in e0 and "delta_func_acc" in e0["vs_full"], e0
+    # mock candidate=[t0,t1,t2] 고정: gold=t3 인 쿼리 1개만 recall miss.
+    assert e0["recall_all"] == 0.75, e0
+    # 레코드에도 recall_all 필드가 기록됐는지.
+    rows = [json.loads(l) for l in open(f"{d}/out/results/downstream_pilot_weak_retrieved_bm25_K10.jsonl")]
+    assert all("recall_all" in r for r in rows), rows[0]
+    print(f"[smoke] OK — 조건 {len(rep['conditions'])}, parse_rate {rep['models']['weak']['parse_rate']}, "
+          f"retrieval_effect {list(eff)}")
 
 
 def main():

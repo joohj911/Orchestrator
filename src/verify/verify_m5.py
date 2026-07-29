@@ -47,6 +47,17 @@ def main() -> None:
     strong = models.get("strong", {})
     for k, m in models.items():
         print(f"  {k}={m.get('model_id')} 파싱성공률 {m.get('parse_rate')} 상태 {m.get('status_counts')}")
+        # 사람 확인용(게이트 아님): 방향 상식성 — full ≤ oracle_tool 인지, retriever 가 도움/해악인지.
+        for cond, cm in (m.get("per_condition_metrics") or {}).items():
+            print(f"    {cond}: func_acc {cm.get('func_acc')} comp {cm.get('completeness')} "
+                  f"recall_all {cm.get('recall_all')} miss {cm.get('miss_type_counts')}")
+        for cond, eff in (m.get("retrieval_effect") or {}).items():
+            vf, vr = eff.get("vs_full", {}), eff.get("vs_random_k", {})
+            print(f"    [효과] {cond}: Δ(vs full) {vf.get('delta_func_acc')} "
+                  f"(도움 {vf.get('helped_queries')}/해악 {vf.get('hurt_queries')}) | "
+                  f"Δ(vs random_k) {vr.get('delta_func_acc')} | "
+                  f"recall hit/miss 시 {eff.get('func_acc_given_recall_hit')}/"
+                  f"{eff.get('func_acc_given_recall_miss')}")
 
     excluded, hyp_unverifiable = [], False
     # 우선순위: 2B(weak) 미달 → 제외 + 가설 검증불가 플래그.
