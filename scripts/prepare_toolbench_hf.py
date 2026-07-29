@@ -85,6 +85,45 @@ CLASSIFIER_SUBSETS = [
     "g1_instruction", "g1_category", "g1_tool", "g2_instruction", "g2_category", "g3_instruction",
 ]
 
+# 외부 대규모 train (HF 미러): ToolBench raw instruction 쿼리 88,895건.
+# 각 row: {query, query_id, api_list(JSON: category_name/tool_name/...), domain, embedding}.
+# gold_categories 라벨 = api_list 의 category 합집합 (instruction 이 그 API 들로부터 생성됨).
+#   G1 계열이라 대부분 단일 category — per-category 인식 신호로 유효.
+# 누출 방어: benchmark 쿼리와 정규화 텍스트가 같은 row 제거 (query_id 체계가 달라
+#   id 필터로는 못 잡음). m4 는 source 필드가 있는 row 를 val/calibration 에서 제외한다.
+EXTERNAL_TRAIN_REPO = "Maurus/ToolBench"
+EXTERNAL_SOURCE_TAG = "external_train"
+
+
+def _norm_text(t: str) -> str:
+    return " ".join(str(t).lower().split())
+
+
+def load_external_train(benchmark_texts: set[str]) -> list[dict[str, Any]]:
+    """외부 train 을 classifier 라벨 포맷으로 변환 (+ benchmark 텍스트 중복 제거)."""
+    from datasets import load_dataset
+    print(f"[external] {EXTERNAL_TRAIN_REPO} 로드 (~330MB, 최초 1회 다운로드)")
+    ds = load_dataset(EXTERNAL_TRAIN_REPO, split="train")
+    rows, n_nocat, n_dup, n_badjson = [], 0, 0, 0
+    for r in ds:
+        try:
+            api_list = _parse_json_field(r["api_list"]) or []
+        except (json.JSONDecodeError, TypeError):
+            n_badjson += 1
+            continue
+        cats = sorted({e.get("category_name") for e in api_list if e.get("category_name")})
+        if not cats:
+            n_nocat += 1
+            continue
+        if _norm_text(r["query"]) in benchmark_texts:
+            n_dup += 1
+            continue
+        rows.append({"query_id": f"ext::{r['query_id']}", "query": r["query"],
+                     "gold_categories": cats, "source": EXTERNAL_SOURCE_TAG})
+    print(f"[external] 사용 {len(rows)} / 제외: benchmark 중복 {n_dup}, category 없음 {n_nocat}, "
+          f"json 오류 {n_badjson}")
+    return rows
+
 
 def gold_categories_of(instance: dict[str, Any]) -> list[str]:
     """convert_row 결과에서 gold API 들의 category 합집합을 뽑는다 (classifier 라벨)."""
@@ -100,31 +139,42 @@ def gold_categories_of(instance: dict[str, Any]) -> list[str]:
     return sorted(cats)
 
 
-def write_classifier_train(ds, dest: str) -> None:
-    """benchmark 전 서브셋 → classifier_train.jsonl {query_id, query, gold_categories} (superset).
+def write_classifier_train(ds, dest: str, include_external: bool = True) -> None:
+    """benchmark 전 서브셋 (+외부 대규모 train) → classifier_train.jsonl (superset).
 
     instruction 서브셋을 포함해 test 와 같은 분포를 학습하게 한다. 이 파일은 후보 superset 이며,
     실제 test 로 샘플된 query_id 는 m4 가 로드 시 제외한다(누출 0). 즉 여기에는 test query_id 도
     섞여 있을 수 있고, 최종 학습셋은 m4 가 data/classifier_train_used.jsonl 로 기록한다.
+    외부 train rows 는 source 필드가 붙고, m4 가 val/calibration 에서 제외한다
+    (val 은 benchmark 분포 유지).
     """
     from collections import Counter
     out_path = os.path.join(dest, "classifier_train.jsonl")
     rows, cat_freq = [], Counter()
+    bench_texts: set[str] = set()
     for sub in CLASSIFIER_SUBSETS:
         if sub not in ds:
             print(f"  [경고] classifier subset '{sub}' 없음 — 건너뜀")
             continue
         for r in ds[sub]:
             inst = convert_row(r, sub)
+            bench_texts.add(_norm_text(inst["query"]))
             gcats = gold_categories_of(inst)
             if not gcats:
                 continue
             rows.append({"query_id": inst["query_id"], "query": inst["query"], "gold_categories": gcats})
             cat_freq.update(gcats)
+    n_bench = len(rows)
+    if include_external:
+        ext = load_external_train(bench_texts)
+        rows.extend(ext)
+        for r in ext:
+            cat_freq.update(r["gold_categories"])
     with open(out_path, "w", encoding="utf-8") as f:
         for r in rows:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
-    print(f"[classifier] train {len(rows)} queries, {len(cat_freq)} categories → {out_path}")
+    print(f"[classifier] train {len(rows)} queries (benchmark {n_bench} + 외부 {len(rows)-n_bench}), "
+          f"{len(cat_freq)} categories → {out_path}")
     print(f"[classifier] category 빈도 상위: {cat_freq.most_common(8)}")
     print(f"[classifier] 최소 빈도 category (하위 5): {cat_freq.most_common()[-5:]}")
 
@@ -133,6 +183,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="HF → ToolBench test_instruction 변환")
     ap.add_argument("--dest", default="./data/toolbench", help="toolbench_root (config 와 일치)")
     ap.add_argument("--combine", action="store_true", help="그룹 내 전 서브셋 합침")
+    ap.add_argument("--no-external-train", action="store_true",
+                    help=f"classifier 학습셋에 외부 대규모 train({EXTERNAL_TRAIN_REPO}) 미포함")
     args = ap.parse_args()
 
     from datasets import load_dataset  # 지연 임포트 (테스트 시 datasets 불필요)
@@ -178,7 +230,7 @@ def main() -> None:
 
     # M4 classifier 학습셋도 함께 생성 (test 와 disjoint).
     print("\n--- classifier 학습셋 (M4용, test 와 겹치지 않음) ---")
-    write_classifier_train(ds, args.dest)
+    write_classifier_train(ds, args.dest, include_external=not args.no_external_train)
 
 
 if __name__ == "__main__":

@@ -326,39 +326,48 @@ def run(config_path: str, force: bool) -> None:
         print(f"[m4] 치명적: 필터 후에도 test id 잔존 {len(leak)}", file=sys.stderr)
         sys.exit(1)
 
-    Y_train = np.stack([multihot(r.get("gold_categories", []), vindex, len(vocab)) for r in train_rows])
-    Y_aug = (np.stack([multihot(r["gold_categories"], vindex, len(vocab)) for r in aug_rows])
-             if aug_rows else np.zeros((0, len(vocab)), dtype=np.float32))
+    # val/calibration 은 benchmark 분포 유지: source 표기 rows(외부 대규모 train, tool example
+    # 증강)는 train 전용으로만 결합한다. val 이 외부(대부분 단일 category) 분포에 쏠리면
+    # early stop·temperature 가 test(멀티 category 포함) 분포와 어긋나기 때문.
+    bench_rows = [r for r in train_rows if not r.get("source")]
+    extra_rows = [r for r in train_rows if r.get("source")] + aug_rows
+    if extra_rows:
+        srcs = Counter(r["source"] for r in extra_rows)
+        print(f"[m4] train 전용(val 미포함) rows {len(extra_rows)} — 출처 {dict(srcs)}")
+
+    Y_bench = np.stack([multihot(r.get("gold_categories", []), vindex, len(vocab)) for r in bench_rows])
+    Y_extra = (np.stack([multihot(r["gold_categories"], vindex, len(vocab)) for r in extra_rows])
+               if extra_rows else np.zeros((0, len(vocab)), dtype=np.float32))
     use_pw = cov["imbalance_ratio"] > float(ccls["imbalance_ratio_threshold"])
     print(f"[m4] pos_weight {'적용' if use_pw else '미적용'} (불균형비 {cov['imbalance_ratio']})")
 
-    # train/val 분리 (val 은 benchmark 쿼리만 — 증강 rows 는 아래에서 train 쪽에만 결합)
+    # train/val 분리 (benchmark rows 에서만)
     rng = np.random.default_rng(seed)
-    idx = rng.permutation(len(train_rows))
-    n_val = max(1, int(round(len(train_rows) * float(ccls["val_frac"]))))
+    idx = rng.permutation(len(bench_rows))
+    n_val = max(1, int(round(len(bench_rows) * float(ccls["val_frac"]))))
     val_idx, tr_idx = idx[:n_val], idx[n_val:]
-    Yval = Y_train[val_idx]
-    Ytr = np.concatenate([Y_train[tr_idx], Y_aug]) if len(Y_aug) else Y_train[tr_idx]
+    Yval = Y_bench[val_idx]
+    Ytr = np.concatenate([Y_bench[tr_idx], Y_extra]) if len(Y_extra) else Y_bench[tr_idx]
 
     # --- method 별 학습 → val_logits, test_logits_by_split, save ---
     if method == "lora":
-        texts = [r["query"] for r in train_rows]
-        aug_texts = [r["query"] for r in aug_rows]
+        texts = [r["query"] for r in bench_rows]
+        extra_texts = [r["query"] for r in extra_rows]
         test_texts = {s: [q["query"] for q in test_rows[s]] for s in splits}
         val_logits, test_logits, save_obj, hparams = train_lora(
-            [texts[i] for i in tr_idx] + aug_texts, Ytr, [texts[i] for i in val_idx], Yval,
+            [texts[i] for i in tr_idx] + extra_texts, Ytr, [texts[i] for i in val_idx], Yval,
             test_texts, model_id, ccls, seed, use_pw)
     elif method == "frozen_mlp":
         from utils.embed import embed_queries
-        X_train = embed_queries([r["query"] for r in train_rows], cfg)
-        X_aug = embed_queries([r["query"] for r in aug_rows], cfg) if aug_rows else None
-        Xtr = np.concatenate([X_train[tr_idx], X_aug]) if X_aug is not None else X_train[tr_idx]
+        X_bench = embed_queries([r["query"] for r in bench_rows], cfg)
+        X_extra = embed_queries([r["query"] for r in extra_rows], cfg) if extra_rows else None
+        Xtr = np.concatenate([X_bench[tr_idx], X_extra]) if X_extra is not None else X_bench[tr_idx]
         test_emb = {}
         for s in splits:
             cache = os.path.join(emb_dir, f"queries_{s}.npy")
             test_emb[s] = np.load(cache) if (not force and os.path.isfile(cache)) else embed_queries([q["query"] for q in test_rows[s]], cfg)
-        logits_of, save_obj, hparams = train_mlp(Xtr, Ytr, X_train[val_idx], Yval, ccls, seed, use_pw)
-        val_logits = logits_of(X_train[val_idx])
+        logits_of, save_obj, hparams = train_mlp(Xtr, Ytr, X_bench[val_idx], Yval, ccls, seed, use_pw)
+        val_logits = logits_of(X_bench[val_idx])
         test_logits = {s: logits_of(test_emb[s]) for s in splits}
     else:
         print(f"[m4] 알 수 없는 method: {method}", file=sys.stderr)
@@ -395,7 +404,7 @@ def run(config_path: str, force: bool) -> None:
                  "ece_val_before": round(ece_before, 4), "ece_val_after": round(ece_after, 4),
                  "ece_test": round(test_ece, 4), "temperature": round(T, 4),
                  "train_category_freq": dict(train_cat_freq.most_common()),
-                 "hparams": hparams, "n_train": len(tr_idx), "n_aug": len(aug_rows),
+                 "hparams": hparams, "n_train_bench": len(tr_idx), "n_train_extra": len(extra_rows),
                  "n_val": len(val_idx), "n_test": len(prior_out)}
     with open(os.path.join(results_dir, "classifier_eval.json"), "w", encoding="utf-8") as f:
         json.dump(eval_json, f, ensure_ascii=False, indent=2)
