@@ -34,6 +34,7 @@ retriever 영향 귀속 (pilot_report.json 에 포함):
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import random
@@ -58,19 +59,26 @@ def _read_jsonl(path):
         return [json.loads(l) for l in f if l.strip()]
 
 
+def _stable_seed(*parts) -> int:
+    """쿼리별 결정적 시드. 파이썬 내장 hash() 는 프로세스마다 salt 가 달라(PYTHONHASHSEED)
+    실행 간 재현이 깨지므로 md5 기반으로 고정한다."""
+    h = hashlib.md5("::".join(map(str, parts)).encode("utf-8")).hexdigest()
+    return int(h[:8], 16)
+
+
 def build_candidates(condition, query_id, gold_ids, all_ids, retrieved, k, rng):
     """축 A 조건별 candidate tool id 목록."""
     if condition == "full":
         return list(all_ids)
     if condition == "random_k":
         pool = [t for t in all_ids if t not in set(gold_ids)]
-        rng2 = random.Random(hash((query_id, "rand")) & 0xFFFFFFFF)
+        rng2 = random.Random(_stable_seed(query_id, "rand"))
         distract = rng2.sample(pool, max(0, min(k - len(gold_ids), len(pool))))
         cand = list(dict.fromkeys(list(gold_ids) + distract))
         return cand[:max(k, len(gold_ids))]
     if condition == "oracle_tool":
         pool = [t for t in all_ids if t not in set(gold_ids)]
-        rng2 = random.Random(hash((query_id, "oracle")) & 0xFFFFFFFF)
+        rng2 = random.Random(_stable_seed(query_id, "oracle"))
         distract = rng2.sample(pool, max(0, min(k - len(gold_ids), len(pool))))
         return list(dict.fromkeys(list(gold_ids) + distract))
     if condition.startswith("retrieved_"):
@@ -88,6 +96,10 @@ class QwenRunner:
         hw = cfg["hardware"]
         self.model_id = model_id
         self.tok = AutoTokenizer.from_pretrained(model_id)
+        # 배치 생성: decoder-only 는 left padding 이어야 생성 결과가 안 깨진다.
+        self.tok.padding_side = "left"
+        if self.tok.pad_token_id is None:
+            self.tok.pad_token = self.tok.eos_token
         dtype = {"bfloat16": torch.bfloat16, "float16": torch.float16, "float32": torch.float32}.get(
             str(hw.get("dtype", "bfloat16")), torch.bfloat16)
         # v5: dtype 인자. device_map 로 GPU 배치.
@@ -97,16 +109,19 @@ class QwenRunner:
         self.dec = cfg["decoding"]
 
     def generate(self, prompt: str) -> str:
+        return self.generate_batch([prompt])[0]
+
+    def generate_batch(self, prompts: list[str]) -> list[str]:
         import torch
-        inputs = self.tok(prompt, return_tensors="pt").to(self.model.device)
+        inputs = self.tok(prompts, return_tensors="pt", padding=True).to(self.model.device)
         with torch.no_grad():
             out = self.model.generate(
                 **inputs, do_sample=bool(self.dec["do_sample"]),
                 max_new_tokens=int(self.dec["max_new_tokens"]),
                 temperature=(None if not self.dec["do_sample"] else float(self.dec["temperature"])),
                 pad_token_id=self.tok.pad_token_id or self.tok.eos_token_id)
-        gen = out[0][inputs["input_ids"].shape[1]:]
-        return self.tok.decode(gen, skip_special_tokens=True)
+        start = inputs["input_ids"].shape[1]  # left padding → 전 시퀀스 동일 시작점
+        return [self.tok.decode(o[start:], skip_special_tokens=True) for o in out]
 
     def prompt_tokens(self, prompt: str) -> int:
         return len(self.tok(prompt).input_ids)
@@ -202,50 +217,80 @@ def run_model(runner, model_key, cfg, tools_by_id, all_ids, queries, retrieved, 
     recs_by_cond = {}
     gold_by_q = {str(q["query_id"]): list(q["gold_tools"]) for q in queries}
 
+    hw = cfg.get("hardware", {})
+    gen_bs = int(hw.get("batch_size_gen", 8))
+    gen_btok = int(hw.get("gen_batch_tokens", 40000))
+
     for cond in conditions:
         rng = random.Random(cfg["seed"])
         recs = []
         cstat = Counter()
+        # 1) 프롬프트 선구성 (조건 내 전 쿼리)
+        items = []
         for q in queries:
             qid = str(q["query_id"])
             gold = gold_by_q[qid]
             cand_ids = build_candidates(cond, qid, gold, all_ids, retrieved, k, rng)
             schemas = [to_openai_schema(tools_by_id[c]) for c in cand_ids if c in tools_by_id]
             prompt = build_prompt(runner.tok, q["query"], schemas, system_prompt=system_prompt)
-            gen = runner.generate(prompt)
-            calls, parse_ok = parse_tool_calls(gen)
-            status = classify_generation(gen)["status"]
-            cstat[status] += 1
-            status_counter[status] += 1
-            # 호출 함수명 → tool id 역매핑 (candidate 내 sanitize_name 기준)
-            rev = {sanitize_name(c): c for c in cand_ids}
-            called_ids = [rev[c["name"]] for c in calls if c.get("name") in rev]
-            fa = score_func(called_ids, gold, split)
-            comp, miss = score_completeness(called_ids, gold, cand_ids)
-            # 엄격 지표 (spec func_acc 보완): 난사·hallucination·실행 불가 호출을 실패로.
-            #   hallucinated: candidate 에 없는 함수명을 지어낸 호출 (full 조건에서 특히 관찰 대상).
-            #   exact_match : 호출 집합 == gold 집합, hallucination 도 실패.
-            #   args_valid  : gold tool 호출이 스키마상 실행 가능한 비율 (required 충족 등).
-            #   strict_success = exact_match ∧ args_valid=1 — gold 인자 없이 잴 수 있는 최엄격 성공.
-            schema_by_name = {s["function"]["name"]: s for s in schemas}
-            hallucinated = sum(1 for c in calls if c.get("name") not in rev)
-            gold_set = set(gold)
-            gold_call_valids = [
-                validate_call(c.get("arguments"), schema_by_name[c["name"]])["valid"]
-                for c in calls if c.get("name") in rev and rev[c["name"]] in gold_set
-            ]
-            args_valid = (sum(gold_call_valids) / len(gold_call_valids)) if gold_call_valids else None
-            exact = float(score_exact(called_ids, gold) == 1.0 and hallucinated == 0)
-            strict = float(exact == 1.0 and args_valid == 1.0)
-            recs.append({
-                "query_id": q["query_id"], "condition": cond, "n_candidates": len(cand_ids),
-                "called_tools": called_ids, "parse_ok": parse_ok, "gen_status": status,
-                "func_acc": fa, "arg_acc": None, "completeness": comp, "miss_type": miss,
-                "recall_all": recall_all(cand_ids, gold),
-                "n_calls": len(calls), "hallucinated_calls": hallucinated,
-                "exact_match": exact, "args_valid": args_valid, "strict_success": strict,
-                "prompt_tokens": runner.prompt_tokens(prompt),
-            })
+            items.append({"q": q, "gold": gold, "cand_ids": cand_ids, "schemas": schemas,
+                          "prompt": prompt, "ptok": runner.prompt_tokens(prompt)})
+        # 2) 토큰 예산 기반 배치 (full 조건처럼 프롬프트가 길면 배치가 자동으로 작아짐)
+        batches, cur, cur_tok = [], [], 0
+        for it in items:
+            if cur and (len(cur) >= gen_bs or cur_tok + it["ptok"] > gen_btok):
+                batches.append(cur)
+                cur, cur_tok = [], 0
+            cur.append(it)
+            cur_tok += it["ptok"]
+        if cur:
+            batches.append(cur)
+        # 3) 배치 생성 + 채점
+        done = 0
+        for batch in batches:
+            prompts = [it["prompt"] for it in batch]
+            if hasattr(runner, "generate_batch"):
+                gens = runner.generate_batch(prompts)
+            else:  # mock 등 단건 러너 폴백
+                gens = [runner.generate(p) for p in prompts]
+            for it, gen in zip(batch, gens):
+                q, gold, cand_ids, schemas = it["q"], it["gold"], it["cand_ids"], it["schemas"]
+                calls, parse_ok = parse_tool_calls(gen)
+                status = classify_generation(gen)["status"]
+                cstat[status] += 1
+                status_counter[status] += 1
+                # 호출 함수명 → tool id 역매핑 (candidate 내 sanitize_name 기준)
+                rev = {sanitize_name(c): c for c in cand_ids}
+                called_ids = [rev[c["name"]] for c in calls if c.get("name") in rev]
+                fa = score_func(called_ids, gold, split)
+                comp, miss = score_completeness(called_ids, gold, cand_ids)
+                # 엄격 지표 (spec func_acc 보완): 난사·hallucination·실행 불가 호출을 실패로.
+                #   hallucinated: candidate 에 없는 함수명을 지어낸 호출 (full 조건에서 특히 관찰 대상).
+                #   exact_match : 호출 집합 == gold 집합, hallucination 도 실패.
+                #   args_valid  : gold tool 호출이 스키마상 실행 가능한 비율 (required 충족 등).
+                #   strict_success = exact_match ∧ args_valid=1 — gold 인자 없이 잴 수 있는 최엄격 성공.
+                schema_by_name = {s["function"]["name"]: s for s in schemas}
+                hallucinated = sum(1 for c in calls if c.get("name") not in rev)
+                gold_set = set(gold)
+                gold_call_valids = [
+                    validate_call(c.get("arguments"), schema_by_name[c["name"]])["valid"]
+                    for c in calls if c.get("name") in rev and rev[c["name"]] in gold_set
+                ]
+                args_valid = (sum(gold_call_valids) / len(gold_call_valids)) if gold_call_valids else None
+                exact = float(score_exact(called_ids, gold) == 1.0 and hallucinated == 0)
+                strict = float(exact == 1.0 and args_valid == 1.0)
+                recs.append({
+                    "query_id": q["query_id"], "condition": cond, "n_candidates": len(cand_ids),
+                    "called_tools": called_ids, "parse_ok": parse_ok, "gen_status": status,
+                    "func_acc": fa, "arg_acc": None, "completeness": comp, "miss_type": miss,
+                    "recall_all": recall_all(cand_ids, gold),
+                    "n_calls": len(calls), "hallucinated_calls": hallucinated,
+                    "exact_match": exact, "args_valid": args_valid, "strict_success": strict,
+                    "prompt_tokens": it["ptok"],
+                })
+            done += len(batch)
+            print(f"[m5] {model_key} {cond}: {done}/{len(items)} "
+                  f"(batch {len(batch)}, 상태 {dict(cstat)})", flush=True)
         per_cond_status[cond] = dict(cstat)
         recs_by_cond[cond] = recs
         out = os.path.join(out_dir, f"downstream_pilot_{model_key}_{cond}_K{k}.jsonl")

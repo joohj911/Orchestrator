@@ -29,7 +29,9 @@ hardware:
   device: "cuda"                  # cuda / cpu
   dtype: "bfloat16"               # 다운스트림 추론 dtype
   batch_size_embed: 64            # 임베딩 배치
-  batch_size_gen: 8               # 다운스트림 생성 배치 (OOM 시 축소)
+  batch_size_gen: 8               # 다운스트림 생성 배치 최대 시퀀스 수 (OOM 시 축소)
+  gen_batch_tokens: 40000         # 배치 내 프롬프트 토큰 합 상한 — full 조건(500 스키마,
+                                  # 쿼리당 수만 토큰)은 자동으로 배치 1~2 로 줄어 OOM 방지
 
 experiment:
   splits: ["I1", "I2", "I3"]      # 변경 금지
