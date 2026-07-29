@@ -51,10 +51,14 @@ experiment:
   categories: 49                  # RapidAPI category 수
 
 fusion:
-  # grid search 범위 (변경 금지). validation에서 Recall_all@10 최대화로 선택.
+  # grid search 범위. validation에서 Recall_all@10 최대화로 선택.
+  # v2 (2026-07, real prior 실측 근거): 기존 하한(beta 0.3 / lambda 0.5)이 prior 사용을
+  # 강제해, 노이즈 있는 real prior 에서 fusion 이 dense_multi 대비 손실을 0 으로 줄일 수
+  # 없었다 (I3). 약한 결합 beta 0.1 / lambda 0.25 추가. 0 은 넣지 않는다 — prior 를 끄면
+  # dense_multi 조건과 동일해져 조건 중복 (그 비교는 dense_multi 행이 담당).
   alpha_grid: [0.3, 0.5, 0.7]
-  beta_grid:  [0.3, 0.5, 0.7]
-  lambda_grid: [0.5, 1.0]
+  beta_grid:  [0.1, 0.3, 0.5, 0.7]
+  lambda_grid: [0.25, 0.5, 1.0]
   epsilon: 0.05                   # multiplicative floor
   selection_metric: "recall_all@10"
   norm_method: "zscore"           # zscore | minmax (택1 고정)
