@@ -93,13 +93,15 @@ classifier:
   # train 에 추가. oracle→real fusion recall gap 이 커서(2026-07 실측) 도입 — pool 49
   # category 를 전부 덮는 in-domain 신호. M2 게이트가 test 누출을 이미 검증. val 미포함.
   augment_tool_examples: true
-  augment_repeat: 1               # DECISION NEEDED: 외부 train 대비 2,500건 비중이 작으면 2~4 로 상향 재실험
+  augment_repeat: 4               # v3 (2026-07): 외부 71k 대비 2,500건(3%)이 묻혀서 4 로 상향(~12%).
+                                  # in-domain 49 category 신호 강화 목적.
   # --- lora 전용 (소량·불균형 데이터라 과적합 방지: 작은 rank + dropout + early stop) ---
   lora:
-    r: 8
-    alpha: 16
+    # v3 (2026-07): 89k 학습셋으로 커져 과적합 위험 감소 → 용량 확대 (r 8→16, key/dense 추가).
+    r: 16
+    alpha: 32
     dropout: 0.1
-    target_modules: ["query", "value"]   # XLM-R attention. 필요시 key/dense 추가.
+    target_modules: ["query", "key", "value", "dense"]   # XLM-R attention + dense (FFN 포함)
     lr: 0.0001                     # 미세조정 lr (head 포함)
     epochs: 30
     batch_size: 16

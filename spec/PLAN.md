@@ -24,7 +24,7 @@
 - oracle_tool: 정답 tool + distractor로 K — 상한 (완벽한 retrieval)
 
 ### 축 B — retrieval 방법 (retrieved_k에만)
-- bm25: 참고 baseline
+- ~~bm25~~: (제외 2026-07, 사용자 결정)
 - dense_single: description-only single-vector
 - dense_multi: multi-vector(desc+example5) max aggregation
 - fusion_add: dense_multi + class prior, additive

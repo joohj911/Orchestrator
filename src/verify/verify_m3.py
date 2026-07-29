@@ -22,7 +22,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.config import load_config  # noqa: E402
 from utils.scoring import recall_all  # noqa: E402
 
-NON_FUSION = ["bm25", "dense_single", "dense_multi"]
+# bm25 는 2026-07 사용자 결정으로 실험에서 제외 (PLAN.md 축 B 참조).
+NON_FUSION = ["dense_single", "dense_multi"]
 FUSION = ["fusion_add", "fusion_mult"]
 
 

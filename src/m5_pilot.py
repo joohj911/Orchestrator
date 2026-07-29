@@ -49,7 +49,8 @@ from utils.scoring import score_func, score_completeness, recall_all, score_exac
 
 # 축 A 조건 + 축 B 방법 (retrieved_k 에 적용). fusion 은 oracle prior(M3) + real prior(M4 후
 # m3 --real-prior 로 생성). real 파일이 아직 없으면 경고 후 해당 조건만 건너뛴다.
-RETRIEVAL_METHODS = ["bm25", "dense_single", "dense_multi",
+# bm25 는 2026-07 사용자 결정으로 실험에서 제외.
+RETRIEVAL_METHODS = ["dense_single", "dense_multi",
                      "fusion_add_oracle", "fusion_mult_oracle",
                      "fusion_add_real", "fusion_mult_real"]
 
@@ -377,7 +378,7 @@ def _smoke():
     qs = [{"query_id": f"I1_{i}", "query": f"do thing {i}", "gold_tools": [tools[i % 8]["id"]],
            "gold_categories": ["C"]} for i in range(4)]
     open(f"{d}/out/data/queries_I1.jsonl", "w").write("\n".join(map(json.dumps, qs)) + "\n")
-    for m in ["bm25", "dense_single", "dense_multi"]:
+    for m in ["dense_single", "dense_multi"]:
         rows = [{"query_id": q["query_id"], "candidate_tools": [tools[i % 8]["id"] for i in range(3)]} for q in qs]
         open(f"{d}/out/results/retrieval_I1_{m}_10.jsonl", "w").write("\n".join(map(json.dumps, rows)) + "\n")
     cfg = yaml.safe_load(open("config.yaml"))
@@ -425,7 +426,7 @@ def _smoke():
     # mock candidate=[t0,t1,t2] 고정: gold=t3 인 쿼리 1개만 recall miss.
     assert e0["recall_all"] == 0.75, e0
     # 레코드에도 새 필드가 기록됐는지.
-    rows = [json.loads(l) for l in open(f"{d}/out/results/downstream_pilot_weak_retrieved_bm25_K10.jsonl")]
+    rows = [json.loads(l) for l in open(f"{d}/out/results/downstream_pilot_weak_retrieved_dense_single_K10.jsonl")]
     need = {"recall_all", "n_calls", "hallucinated_calls", "exact_match", "args_valid", "strict_success"}
     assert all(need <= set(r) for r in rows), rows[0]
     print(f"[smoke] OK — 조건 {len(rep['conditions'])}, parse_rate {rep['models']['weak']['parse_rate']}, "

@@ -39,7 +39,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from utils.config import load_config  # noqa: E402
 from utils.scoring import recall_all  # noqa: E402
 
-NON_FUSION = ["bm25", "dense_single", "dense_multi"]
+# bm25 는 2026-07 사용자 결정으로 실험에서 제외 (PLAN.md 축 B 참조).
+NON_FUSION = ["dense_single", "dense_multi"]
 FUSION = ["fusion_add", "fusion_mult"]
 
 
@@ -55,10 +56,6 @@ def build_tool_desc_text(tool: dict) -> str:
     if pnames:
         parts.append("Parameters: " + ", ".join(pnames))
     return ". ".join(p for p in parts if p).strip()
-
-
-def build_tool_bm25_text(tool: dict, examples: list[str]) -> str:
-    return build_tool_desc_text(tool) + " " + " ".join(examples)
 
 
 def assign_folds(query_ids: list[str], n_folds: int, seed: int) -> dict[str, int]:
@@ -121,10 +118,6 @@ def fusion_add_scores(s_sem, p_class, alpha, beta, mean, std):
 
 def fusion_mult_scores(s_sem, p_class, lam, eps):
     return s_sem * np.power(np.maximum(p_class, eps), lam)
-
-
-def _tokenize(text):
-    return [t for t in "".join(c.lower() if c.isalnum() else " " for c in text).split() if t]
 
 
 def grid_search_fusion(method, tr_sem, tr_prior, tr_golds, tool_ids, cfg_fusion, mean, std):
@@ -203,9 +196,6 @@ def run(config_path: str, force: bool) -> None:
 
     tool_vecs = np.concatenate([desc_mat[:, None, :], tool_ex_mat], axis=1)  # (n_tools,6,d)
 
-    from rank_bm25 import BM25Okapi
-    bm25 = BM25Okapi([_tokenize(build_tool_bm25_text(t, ex_by_tool.get(t["id"], []))) for t in tools])
-
     fusion_coeffs: dict[str, Any] = {"n_folds": n_folds, "norm_method": fcfg["norm_method"], "splits": {}}
 
     for split in splits:
@@ -228,7 +218,6 @@ def run(config_path: str, force: bool) -> None:
 
         sem_scores = [cosine_scores_multi(q_mat[i], tool_vecs) for i in range(len(queries))]
         single_scores = [cosine_scores_single(q_mat[i], desc_mat) for i in range(len(queries))]
-        bm25_scores = [np.asarray(bm25.get_scores(_tokenize(q["query"])), dtype=np.float32) for q in queries]
 
         # --- fold 별 계수 + zscore (그 fold 를 train 에서 제외) ---
         fold_info: dict[int, dict] = {}
@@ -262,9 +251,7 @@ def run(config_path: str, force: bool) -> None:
                 with open(os.path.join(results_dir, fname), "w", encoding="utf-8") as fh:
                     for i, q in enumerate(queries):
                         f = fold_of[str(q["query_id"])]
-                        if method == "bm25":
-                            sc = bm25_scores[i]
-                        elif method == "dense_single":
+                        if method == "dense_single":
                             sc = single_scores[i]
                         elif method == "dense_multi":
                             sc = sem_scores[i]

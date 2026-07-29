@@ -9,7 +9,7 @@
 - Query embedding: test 쿼리별 1 벡터 저장. (Router 재사용 가정이나 이 실험은 retrieval까지.)
 
 ## 축 B 방법
-- **bm25**: tool 텍스트(desc+example) BM25, top-K.
+- ~~bm25~~: (제외 2026-07, 사용자 결정 — dense 계열과 fusion 에 집중)
 - **dense_single**: query ↔ description vector cosine, top-K.
 - **dense_multi**: query ↔ 6벡터 max cosine = tool score, top-K.
 - **fusion_add**: score = α·norm(s_sem) + β·p_class. s_sem=dense_multi score.
