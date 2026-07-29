@@ -110,7 +110,12 @@ prompt:
   # 동일하게 적용된다. 바뀌는 것은 candidate tool 목록뿐. 변경 시 전체 재실행 필요.
   # 정답을 흘리거나 특정 조건만 다르게 주면 안 된다. tool 사용을 유도하는 중립 문구만.
   # null 로 두면 system 프롬프트 없이 chat_template 의 기본 tool 지시만 사용.
-  system_instruction: "You have access to a set of tools. Use the appropriate tool(s) with the correct arguments to fulfill the user's request."
+  # v2 (2026-07, M5 파일럿 실측 근거): 9B가 full 조건에서 no_call 18% (2B 는 7%) —
+  # 잘 정렬된 모델일수록 확신 없으면 텍스트로 답하는 성향. 벤치마크는 전 쿼리에 gold
+  # tool 이 있으므로 호출을 명시 요구 (tool_choice=required 에 해당). 여전히 조건 중립.
+  # v1: "You have access to a set of tools. Use the appropriate tool(s) with the
+  #      correct arguments to fulfill the user's request."
+  system_instruction: "You have access to a set of tools. You must fulfill the user's request by calling the appropriate tool(s) with the correct arguments. Always respond with at least one tool call. Do not answer in plain text and do not ask clarifying questions."
 
 pilot:
   # M5 파일럿: 소규모 사전 검증
