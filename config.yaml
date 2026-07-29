@@ -56,9 +56,12 @@ fusion:
   # 강제해, 노이즈 있는 real prior 에서 fusion 이 dense_multi 대비 손실을 0 으로 줄일 수
   # 없었다 (I3). 약한 결합 beta 0.1 / lambda 0.25 추가. 0 은 넣지 않는다 — prior 를 끄면
   # dense_multi 조건과 동일해져 조건 중복 (그 비교는 dense_multi 행이 담당).
+  # 스케일 참고: add 는 s_sem 을 zscore 후 결합하므로 beta 0.1 이 사실상 최소 유효 결합.
+  # mult 는 raw 코사인(e5 는 0.75~0.92 로 압축됨, tool 간 ~1.15x) × p^lambda 라서
+  # lambda 0.25 에서도 prior 인자 폭(~2.1x)이 semantic 을 지배 → 0.1(~1.35x) 추가.
   alpha_grid: [0.3, 0.5, 0.7]
   beta_grid:  [0.1, 0.3, 0.5, 0.7]
-  lambda_grid: [0.25, 0.5, 1.0]
+  lambda_grid: [0.1, 0.25, 0.5, 1.0]
   epsilon: 0.05                   # multiplicative floor
   selection_metric: "recall_all@10"
   norm_method: "zscore"           # zscore | minmax (택1 고정)
