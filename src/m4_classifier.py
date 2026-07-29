@@ -214,7 +214,7 @@ def run(config_path: str, force: bool) -> None:
     if not (train_path and os.path.isfile(train_path)):
         print(f"[m4] classifier_train 없음: {train_path}. prepare_toolbench_hf.py 먼저 실행.", file=sys.stderr)
         sys.exit(1)
-    train_rows = _read_jsonl(train_path)
+    train_rows_raw = _read_jsonl(train_path)
 
     # test 쿼리 + gold_categories
     test_rows: dict[str, list[dict]] = {}
@@ -224,6 +224,17 @@ def run(config_path: str, force: bool) -> None:
         test_rows[s] = rows
         for q in rows:
             test_cats.update(q.get("gold_categories", []))
+    all_test_ids = {str(q["query_id"]) for s in splits for q in test_rows[s]}
+
+    # classifier_train 은 benchmark superset → 실제 test 로 샘플된 query_id 제외(누출 0).
+    train_rows = [r for r in train_rows_raw if str(r["query_id"]) not in all_test_ids]
+    n_removed = len(train_rows_raw) - len(train_rows)
+    print(f"[m4] classifier_train {len(train_rows_raw)} 후보 중 test 중복 {n_removed}개 제외 → 학습 {len(train_rows)}")
+    # 실제 학습셋을 감사 가능하게 기록 (verify_m4 가 이 파일로 누출 검사).
+    used_path = os.path.join(data_dir, "classifier_train_used.jsonl")
+    with open(used_path, "w", encoding="utf-8") as f:
+        for r in train_rows:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
     train_cat_freq = Counter(c for r in train_rows for c in r.get("gold_categories", []))
     vocab = build_vocab(pool_cats, set(train_cat_freq), test_cats)
@@ -236,12 +247,10 @@ def run(config_path: str, force: bool) -> None:
         print(f"     미커버(예): {cov['test_cats_missing_in_train'][:8]}")
     print(f"[m4] train 불균형비(최다:최소) ≈ {cov['imbalance_ratio']}")
 
-    # --- 누출 검증: test query_id ∉ train ---
-    train_ids = {str(r["query_id"]) for r in train_rows}
-    all_test_ids = {str(q["query_id"]) for s in splits for q in test_rows[s]}
-    leak = train_ids & all_test_ids
+    # --- 누출 안전 확인: 필터 후 train 에 test id 가 없어야 함 (verify_m4 가 최종 검증) ---
+    leak = {str(r["query_id"]) for r in train_rows} & all_test_ids
     if leak:
-        print(f"[m4] 치명적: train 에 test query_id {len(leak)}개 누출: {list(leak)[:3]}", file=sys.stderr)
+        print(f"[m4] 치명적: 필터 후에도 test query_id 잔존 {len(leak)}: {list(leak)[:3]}", file=sys.stderr)
         sys.exit(1)
 
     # --- 임베딩 (e5 frozen) ---

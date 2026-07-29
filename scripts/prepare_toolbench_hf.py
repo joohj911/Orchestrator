@@ -78,8 +78,12 @@ def distinct_gold_count(instance: dict[str, Any]) -> int:
     return len(pairs)
 
 
-# M4 classifier 학습셋: test(g*_instruction)와 겹치지 않는 미사용 서브셋.
-CLASSIFIER_SUBSETS = ["g1_category", "g1_tool", "g2_category"]
+# M4 classifier 학습 후보: benchmark 전 서브셋(6개). instruction 서브셋을 포함해야
+# test(g*_instruction)와 같은 분포로 학습된다. 실제 test 로 샘플된 query_id 는 m4 가
+# 제외하므로(누출 0), 여기서는 superset 을 넉넉히 내보낸다.
+CLASSIFIER_SUBSETS = [
+    "g1_instruction", "g1_category", "g1_tool", "g2_instruction", "g2_category", "g3_instruction",
+]
 
 
 def gold_categories_of(instance: dict[str, Any]) -> list[str]:
@@ -97,9 +101,11 @@ def gold_categories_of(instance: dict[str, Any]) -> list[str]:
 
 
 def write_classifier_train(ds, dest: str) -> None:
-    """미사용 서브셋 → classifier_train.jsonl {query_id, query, gold_categories}.
+    """benchmark 전 서브셋 → classifier_train.jsonl {query_id, query, gold_categories} (superset).
 
-    test(g*_instruction)와 subset 접두어가 달라 query_id 가 겹치지 않는다(누출 0).
+    instruction 서브셋을 포함해 test 와 같은 분포를 학습하게 한다. 이 파일은 후보 superset 이며,
+    실제 test 로 샘플된 query_id 는 m4 가 로드 시 제외한다(누출 0). 즉 여기에는 test query_id 도
+    섞여 있을 수 있고, 최종 학습셋은 m4 가 data/classifier_train_used.jsonl 로 기록한다.
     """
     from collections import Counter
     out_path = os.path.join(dest, "classifier_train.jsonl")

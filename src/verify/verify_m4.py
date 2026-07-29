@@ -43,12 +43,13 @@ def main() -> None:
         p = os.path.join(data_dir, f"queries_{s}.jsonl")
         if os.path.isfile(p):
             test_ids |= {str(q["query_id"]) for q in _read_jsonl(p)}
-    train_path = cfg["paths"].get("classifier_train", "")
+    # m4 가 실제 학습에 쓴 셋(test 중복 제외 후)을 검사한다.
+    used_path = os.path.join(data_dir, "classifier_train_used.jsonl")
     train_ids = set()
-    if train_path and os.path.isfile(train_path):
-        train_ids = {str(r["query_id"]) for r in _read_jsonl(train_path)}
+    if os.path.isfile(used_path):
+        train_ids = {str(r["query_id"]) for r in _read_jsonl(used_path)}
     else:
-        errors.append(f"classifier_train 없음: {train_path}")
+        errors.append(f"classifier_train_used.jsonl 없음: {used_path} (m4 먼저 실행)")
 
     # 1) 누출 0 (게이트 핵심)
     leak = train_ids & test_ids
