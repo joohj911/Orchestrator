@@ -99,6 +99,27 @@ def _norm_text(t: str) -> str:
     return " ".join(str(t).lower().split())
 
 
+def _parse_api_list_lenient(v: Any) -> list | None:
+    """외부 train 의 api_list 파싱. Maurus/ToolBench 는 JSON 이 아니라 Python repr
+    (작은따옴표) 문자열로 저장돼 있어 ast.literal_eval 폴백이 필수 (2026-07 실측:
+    json.loads 만 쓰면 88,895행 전부 실패)."""
+    if isinstance(v, list):
+        return v
+    if not isinstance(v, str):
+        return None
+    try:
+        out = json.loads(v)
+        return out if isinstance(out, list) else None
+    except json.JSONDecodeError:
+        pass
+    try:
+        import ast
+        out = ast.literal_eval(v)
+        return out if isinstance(out, list) else None
+    except (ValueError, SyntaxError, MemoryError, RecursionError):
+        return None
+
+
 def load_external_train(benchmark_texts: set[str]) -> list[dict[str, Any]]:
     """외부 train 을 classifier 라벨 포맷으로 변환 (+ benchmark 텍스트 중복 제거)."""
     from datasets import load_dataset
@@ -106,12 +127,12 @@ def load_external_train(benchmark_texts: set[str]) -> list[dict[str, Any]]:
     ds = load_dataset(EXTERNAL_TRAIN_REPO, split="train")
     rows, n_nocat, n_dup, n_badjson = [], 0, 0, 0
     for r in ds:
-        try:
-            api_list = _parse_json_field(r["api_list"]) or []
-        except (json.JSONDecodeError, TypeError):
+        api_list = _parse_api_list_lenient(r["api_list"])
+        if api_list is None:
             n_badjson += 1
             continue
-        cats = sorted({e.get("category_name") for e in api_list if e.get("category_name")})
+        cats = sorted({e.get("category_name") for e in api_list
+                       if isinstance(e, dict) and e.get("category_name")})
         if not cats:
             n_nocat += 1
             continue
