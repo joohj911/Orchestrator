@@ -88,6 +88,55 @@ def build_candidates(condition, query_id, gold_ids, all_ids, retrieved, k, rng):
     raise ValueError(condition)
 
 
+def score_generation(gen: str, cand_ids, schemas, gold, split) -> dict:
+    """생성 텍스트 1건 채점 (m5/m6 공용). 채점 필드 dict 반환.
+
+    엄격 지표 (spec func_acc 보완): 난사·hallucination·실행 불가 호출을 실패로.
+      hallucinated: candidate 에 없는 함수명을 지어낸 호출 (full 조건에서 특히 관찰 대상).
+      exact_match : 호출 집합 == gold 집합, hallucination 도 실패.
+      args_valid  : gold tool 호출이 스키마상 실행 가능한 비율 (required 충족 등).
+      strict_success = exact_match ∧ args_valid=1 — gold 인자 없이 잴 수 있는 최엄격 성공.
+    """
+    calls, parse_ok = parse_tool_calls(gen)
+    status = classify_generation(gen)["status"]
+    # 호출 함수명 → tool id 역매핑 (candidate 내 sanitize_name 기준)
+    rev = {sanitize_name(c): c for c in cand_ids}
+    called_ids = [rev[c["name"]] for c in calls if c.get("name") in rev]
+    fa = score_func(called_ids, gold, split)
+    comp, miss = score_completeness(called_ids, gold, cand_ids)
+    schema_by_name = {s["function"]["name"]: s for s in schemas}
+    hallucinated = sum(1 for c in calls if c.get("name") not in rev)
+    gold_set = set(gold)
+    gold_call_valids = [
+        validate_call(c.get("arguments"), schema_by_name[c["name"]])["valid"]
+        for c in calls if c.get("name") in rev and rev[c["name"]] in gold_set
+    ]
+    args_valid = (sum(gold_call_valids) / len(gold_call_valids)) if gold_call_valids else None
+    exact = float(score_exact(called_ids, gold) == 1.0 and hallucinated == 0)
+    strict = float(exact == 1.0 and args_valid == 1.0)
+    return {
+        "called_tools": called_ids, "parse_ok": parse_ok, "gen_status": status,
+        "func_acc": fa, "arg_acc": None, "completeness": comp, "miss_type": miss,
+        "recall_all": recall_all(cand_ids, gold),
+        "n_calls": len(calls), "hallucinated_calls": hallucinated,
+        "exact_match": exact, "args_valid": args_valid, "strict_success": strict,
+    }
+
+
+def make_batches(items, gen_bs: int, gen_btok: int):
+    """토큰 예산 기반 배치 (m5/m6 공용). items 는 {'ptok': int, ...} dict 리스트."""
+    batches, cur, cur_tok = [], [], 0
+    for it in items:
+        if cur and (len(cur) >= gen_bs or cur_tok + it["ptok"] > gen_btok):
+            batches.append(cur)
+            cur, cur_tok = [], 0
+        cur.append(it)
+        cur_tok += it["ptok"]
+    if cur:
+        batches.append(cur)
+    return batches
+
+
 class QwenRunner:
     """Qwen3.5 downstream 러너 (transformers generate, vLLM 미사용)."""
 
@@ -238,57 +287,21 @@ def run_model(runner, model_key, cfg, tools_by_id, all_ids, queries, retrieved, 
             items.append({"q": q, "gold": gold, "cand_ids": cand_ids, "schemas": schemas,
                           "prompt": prompt, "ptok": runner.prompt_tokens(prompt)})
         # 2) 토큰 예산 기반 배치 (full 조건처럼 프롬프트가 길면 배치가 자동으로 작아짐)
-        batches, cur, cur_tok = [], [], 0
-        for it in items:
-            if cur and (len(cur) >= gen_bs or cur_tok + it["ptok"] > gen_btok):
-                batches.append(cur)
-                cur, cur_tok = [], 0
-            cur.append(it)
-            cur_tok += it["ptok"]
-        if cur:
-            batches.append(cur)
         # 3) 배치 생성 + 채점
         done = 0
-        for batch in batches:
+        for batch in make_batches(items, gen_bs, gen_btok):
             prompts = [it["prompt"] for it in batch]
             if hasattr(runner, "generate_batch"):
                 gens = runner.generate_batch(prompts)
             else:  # mock 등 단건 러너 폴백
                 gens = [runner.generate(p) for p in prompts]
             for it, gen in zip(batch, gens):
-                q, gold, cand_ids, schemas = it["q"], it["gold"], it["cand_ids"], it["schemas"]
-                calls, parse_ok = parse_tool_calls(gen)
-                status = classify_generation(gen)["status"]
-                cstat[status] += 1
-                status_counter[status] += 1
-                # 호출 함수명 → tool id 역매핑 (candidate 내 sanitize_name 기준)
-                rev = {sanitize_name(c): c for c in cand_ids}
-                called_ids = [rev[c["name"]] for c in calls if c.get("name") in rev]
-                fa = score_func(called_ids, gold, split)
-                comp, miss = score_completeness(called_ids, gold, cand_ids)
-                # 엄격 지표 (spec func_acc 보완): 난사·hallucination·실행 불가 호출을 실패로.
-                #   hallucinated: candidate 에 없는 함수명을 지어낸 호출 (full 조건에서 특히 관찰 대상).
-                #   exact_match : 호출 집합 == gold 집합, hallucination 도 실패.
-                #   args_valid  : gold tool 호출이 스키마상 실행 가능한 비율 (required 충족 등).
-                #   strict_success = exact_match ∧ args_valid=1 — gold 인자 없이 잴 수 있는 최엄격 성공.
-                schema_by_name = {s["function"]["name"]: s for s in schemas}
-                hallucinated = sum(1 for c in calls if c.get("name") not in rev)
-                gold_set = set(gold)
-                gold_call_valids = [
-                    validate_call(c.get("arguments"), schema_by_name[c["name"]])["valid"]
-                    for c in calls if c.get("name") in rev and rev[c["name"]] in gold_set
-                ]
-                args_valid = (sum(gold_call_valids) / len(gold_call_valids)) if gold_call_valids else None
-                exact = float(score_exact(called_ids, gold) == 1.0 and hallucinated == 0)
-                strict = float(exact == 1.0 and args_valid == 1.0)
+                s = score_generation(gen, it["cand_ids"], it["schemas"], it["gold"], split)
+                cstat[s["gen_status"]] += 1
+                status_counter[s["gen_status"]] += 1
                 recs.append({
-                    "query_id": q["query_id"], "condition": cond, "n_candidates": len(cand_ids),
-                    "called_tools": called_ids, "parse_ok": parse_ok, "gen_status": status,
-                    "func_acc": fa, "arg_acc": None, "completeness": comp, "miss_type": miss,
-                    "recall_all": recall_all(cand_ids, gold),
-                    "n_calls": len(calls), "hallucinated_calls": hallucinated,
-                    "exact_match": exact, "args_valid": args_valid, "strict_success": strict,
-                    "prompt_tokens": it["ptok"],
+                    "query_id": it["q"]["query_id"], "condition": cond,
+                    "n_candidates": len(it["cand_ids"]), **s, "prompt_tokens": it["ptok"],
                 })
             done += len(batch)
             print(f"[m5] {model_key} {cond}: {done}/{len(items)} "

@@ -108,6 +108,11 @@ classifier:
     max_length: 128                # 질의 토큰 상한
     early_stop_patience: 5
 
+analysis:
+  # M6 분석(m6_analysis.py) 파라미터.
+  headline_k: 10                  # 표1·표2 의 downstream 지표를 읽는 대표 K (그림1 은 전체 sweep)
+  low_sim_percentile: 20          # 표3 '저유사도 필수 tool 누락률'의 하위 유사도 컷 (%)
+
 decoding:
   do_sample: false                # greedy. 결정적. 변경 금지.
   temperature: 0.0
