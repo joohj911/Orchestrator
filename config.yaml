@@ -80,6 +80,11 @@ classifier:
   val_frac: 0.2                   # train 중 val 비율 (calibration·early stop 용, seed)
   imbalance_ratio_threshold: 50   # 최다:최소 > 이 값이면 class weight(pos_weight) 적용
   pred_threshold: 0.5             # F1 계산용 이진화 임계 (AUPRC 는 임계 무관)
+  # tool example 증강: data/tools_examples.jsonl(500 tool × 5 발화, tool category 라벨)을
+  # train 에 추가. oracle→real fusion recall gap 이 커서(2026-07 실측) 도입 — pool 49
+  # category 를 전부 덮는 in-domain 신호. M2 게이트가 test 누출을 이미 검증. val 미포함.
+  augment_tool_examples: true
+  augment_repeat: 1               # DECISION NEEDED: 외부 train 대비 2,500건 비중이 작으면 2~4 로 상향 재실험
   # --- lora 전용 (소량·불균형 데이터라 과적합 방지: 작은 rank + dropout + early stop) ---
   lora:
     r: 8

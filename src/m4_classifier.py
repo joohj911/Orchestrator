@@ -283,11 +283,37 @@ def run(config_path: str, force: bool) -> None:
     train_rows = [r for r in train_rows_raw if str(r["query_id"]) not in all_test_ids]
     print(f"[m4] method={method} | classifier_train {len(train_rows_raw)} 후보 중 test 중복 "
           f"{len(train_rows_raw)-len(train_rows)}개 제외 → 학습 {len(train_rows)}")
+
+    # --- tool example 증강 (config.classifier.augment_tool_examples) ---
+    # 배경: oracle→real fusion recall gap 이 커서(2026-07 실측) classifier 가 병목.
+    # tools_examples.jsonl(500 tool × 5 발화)은 pool 49 category 를 전부 덮는 in-domain
+    # 데이터이고, M2 게이트가 test 유사도 누출(max_leak_sim ≤ 0.92)을 이미 검증했다.
+    # 라벨은 해당 tool 의 category 1개 (single-label 이지만 category 인식 신호로 유효).
+    # val/calibration 에는 넣지 않는다 (benchmark 분포 유지) — 아래 split 후 train 쪽에만 결합.
+    aug_base: list[dict] = []
+    aug_rows: list[dict] = []
+    if ccls.get("augment_tool_examples"):
+        ex_path = cfg["paths"].get("examples_file", "") or ""
+        if not (ex_path and os.path.isfile(ex_path)):
+            ex_path = os.path.join(data_dir, "tools_examples.jsonl")
+        cat_of = {t["id"]: t["category"] for t in tools}
+        for r in _read_jsonl(ex_path):
+            cat = cat_of.get(r["tool_id"])
+            if cat is None:
+                continue
+            for j, ex in enumerate(r.get("examples", [])):
+                aug_base.append({"query_id": f"augex_{r['tool_id']}_{j}", "query": ex,
+                                 "gold_categories": [cat], "source": "tool_example_aug"})
+        repeat = int(ccls.get("augment_repeat", 1))
+        aug_rows = aug_base * repeat
+        print(f"[m4] tool example 증강: {len(aug_base)}건 × repeat {repeat} = +{len(aug_rows)} "
+              f"(val 미포함, M2 누출 게이트 통과분)")
+
     with open(os.path.join(data_dir, "classifier_train_used.jsonl"), "w", encoding="utf-8") as f:
-        for r in train_rows:
+        for r in train_rows + aug_base:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
-    train_cat_freq = Counter(c for r in train_rows for c in r.get("gold_categories", []))
+    train_cat_freq = Counter(c for r in train_rows + aug_rows for c in r.get("gold_categories", []))
     vocab = build_vocab(pool_cats, set(train_cat_freq), test_cats)
     vindex = {c: i for i, c in enumerate(vocab)}
     cov = coverage_report(train_cat_freq, test_cats, vocab)
@@ -301,31 +327,37 @@ def run(config_path: str, force: bool) -> None:
         sys.exit(1)
 
     Y_train = np.stack([multihot(r.get("gold_categories", []), vindex, len(vocab)) for r in train_rows])
+    Y_aug = (np.stack([multihot(r["gold_categories"], vindex, len(vocab)) for r in aug_rows])
+             if aug_rows else np.zeros((0, len(vocab)), dtype=np.float32))
     use_pw = cov["imbalance_ratio"] > float(ccls["imbalance_ratio_threshold"])
     print(f"[m4] pos_weight {'적용' if use_pw else '미적용'} (불균형비 {cov['imbalance_ratio']})")
 
-    # train/val 분리
+    # train/val 분리 (val 은 benchmark 쿼리만 — 증강 rows 는 아래에서 train 쪽에만 결합)
     rng = np.random.default_rng(seed)
     idx = rng.permutation(len(train_rows))
     n_val = max(1, int(round(len(train_rows) * float(ccls["val_frac"]))))
     val_idx, tr_idx = idx[:n_val], idx[n_val:]
     Yval = Y_train[val_idx]
+    Ytr = np.concatenate([Y_train[tr_idx], Y_aug]) if len(Y_aug) else Y_train[tr_idx]
 
     # --- method 별 학습 → val_logits, test_logits_by_split, save ---
     if method == "lora":
         texts = [r["query"] for r in train_rows]
+        aug_texts = [r["query"] for r in aug_rows]
         test_texts = {s: [q["query"] for q in test_rows[s]] for s in splits}
         val_logits, test_logits, save_obj, hparams = train_lora(
-            [texts[i] for i in tr_idx], Y_train[tr_idx], [texts[i] for i in val_idx], Yval,
+            [texts[i] for i in tr_idx] + aug_texts, Ytr, [texts[i] for i in val_idx], Yval,
             test_texts, model_id, ccls, seed, use_pw)
     elif method == "frozen_mlp":
         from utils.embed import embed_queries
         X_train = embed_queries([r["query"] for r in train_rows], cfg)
+        X_aug = embed_queries([r["query"] for r in aug_rows], cfg) if aug_rows else None
+        Xtr = np.concatenate([X_train[tr_idx], X_aug]) if X_aug is not None else X_train[tr_idx]
         test_emb = {}
         for s in splits:
             cache = os.path.join(emb_dir, f"queries_{s}.npy")
             test_emb[s] = np.load(cache) if (not force and os.path.isfile(cache)) else embed_queries([q["query"] for q in test_rows[s]], cfg)
-        logits_of, save_obj, hparams = train_mlp(X_train[tr_idx], Y_train[tr_idx], X_train[val_idx], Yval, ccls, seed, use_pw)
+        logits_of, save_obj, hparams = train_mlp(Xtr, Ytr, X_train[val_idx], Yval, ccls, seed, use_pw)
         val_logits = logits_of(X_train[val_idx])
         test_logits = {s: logits_of(test_emb[s]) for s in splits}
     else:
@@ -363,7 +395,8 @@ def run(config_path: str, force: bool) -> None:
                  "ece_val_before": round(ece_before, 4), "ece_val_after": round(ece_after, 4),
                  "ece_test": round(test_ece, 4), "temperature": round(T, 4),
                  "train_category_freq": dict(train_cat_freq.most_common()),
-                 "hparams": hparams, "n_train": len(tr_idx), "n_val": len(val_idx), "n_test": len(prior_out)}
+                 "hparams": hparams, "n_train": len(tr_idx), "n_aug": len(aug_rows),
+                 "n_val": len(val_idx), "n_test": len(prior_out)}
     with open(os.path.join(results_dir, "classifier_eval.json"), "w", encoding="utf-8") as f:
         json.dump(eval_json, f, ensure_ascii=False, indent=2)
     with open(os.path.join(data_dir, "class_prior_real.jsonl"), "w", encoding="utf-8") as f:

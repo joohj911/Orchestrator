@@ -297,14 +297,19 @@ def run_real_prior(config_path: str, force: bool) -> None:
     LLM 불필요 — M6 전에 "classifier 가 병목인가"를 recall 수준에서 먼저 판단하는 용도.
     산출물:
       results/retrieval_{split}_{fusion_add,fusion_mult}_real_{K}.jsonl (M5/M6 이 읽음)
-      results/fusion_real_gap.json (split×method×K 별 oracle vs real Recall_all)
+      results/fusion_real_gap.json (split×method×K 별 oracle / real_reuse / real_refit Recall_all)
+      results/fusion_coeffs_real.json (refit 계수, fold 별)
 
-    # DECISION: fold 계수·zscore 는 M3(oracle prior)에서 선택된 값을 그대로 재사용, prior 만
-    #   교체 (모듈 상단 DECISION 및 run-matrix stage2 와 일치). 계수를 고정해야 gap 이
-    #   순수하게 'prior 품질' 차이가 된다.
-    # DECISION NEEDED: real prior 는 확률(0~1 연속)이라 oracle(0/1)과 스케일이 달라, 고정
-    #   계수가 real 에 불리할 수 있음. gap 이 비정상적으로 크면 train fold 에서 real prior 로
-    #   계수 재탐색(누출 없음: classifier 는 test 를 학습에 안 씀)한 변형을 추가 검토.
+    두 변형을 모두 계산해 기록한다:
+      - reuse: oracle prior 로 선택된 fold 계수를 그대로 사용 (prior 만 교체).
+        계수 고정 → gap 이 'prior 품질 + 계수 스케일 불일치'의 합.
+      - refit: 같은 fold 구성에서 real prior 로 계수 재탐색 (누출 없음 — classifier 는
+        test 를 학습에 안 썼고, fold 는 자기 계수 선택에 불참).
+        deployment 시나리오와 일치 (배포자는 oracle prior 를 가질 수 없음).
+    # DECISION: candidate 파일(retrieval_*_real_*.jsonl)은 refit 계수로 생성한다.
+    #   근거: 2026-07 실측에서 reuse 는 fusion_mult 를 붕괴시킴 (oracle 0/1 스케일로 고른
+    #   lambda 가 연속 확률 prior 에서 gold category 저확률 tool 을 과도 억압). reuse 수치는
+    #   gap json 에 진단용으로 병기.
     """
     cfg = load_config(config_path)
     splits = cfg["experiment"]["splits"]
@@ -333,7 +338,9 @@ def run_real_prior(config_path: str, force: bool) -> None:
     desc_mat, tool_ex_mat = np.load(desc_npy), np.load(ex_npy)
     tool_vecs = np.concatenate([desc_mat[:, None, :], tool_ex_mat], axis=1)
 
-    gap_report: dict[str, Any] = {"splits": {}}
+    gap_report: dict[str, Any] = {"candidate_files_use": "refit", "splits": {}}
+    coeffs_real: dict[str, Any] = {"note": "real prior 로 fold train 에서 재탐색한 계수 (누출 없음)",
+                                   "splits": {}}
     for split in splits:
         queries = _read_jsonl(os.path.join(data_dir, f"queries_{split}.jsonl"))
         qids = [str(q["query_id"]) for q in queries]
@@ -352,47 +359,70 @@ def run_real_prior(config_path: str, force: bool) -> None:
         fold_of = sc_split["fold_assignment"]
         folds = sc_split["folds"]
 
+        # --- refit: 같은 fold 구성·zscore 에서 real prior 로 계수 재탐색 ---
+        refit_folds: dict[str, dict] = {}
+        for f_str, info in folds.items():
+            tr_idx = [i for i, q in enumerate(queries) if str(fold_of[str(q["query_id"])]) != f_str]
+            entry = {"zscore_mean": info["zscore_mean"], "zscore_std": info["zscore_std"]}
+            tr_sem = [sem_scores[i] for i in tr_idx]
+            tr_prior = [prior_real[i] for i in tr_idx]
+            tr_golds = [set(gold_by_q[i]) for i in tr_idx]
+            for m in FUSION:
+                entry[m] = grid_search_fusion(m, tr_sem, tr_prior, tr_golds, tool_ids, cfg["fusion"],
+                                              entry["zscore_mean"], entry["zscore_std"])
+            refit_folds[f_str] = entry
+        coeffs_real["splits"][split] = refit_folds
+
+        def scores_for(i, method, fold_map):
+            f = str(fold_of[str(queries[i]["query_id"])])
+            info = fold_map[f]
+            c = info[method]
+            if method == "fusion_add":
+                return fusion_add_scores(sem_scores[i], prior_real[i], c["alpha"], c["beta"],
+                                         info["zscore_mean"], info["zscore_std"]), f
+            return fusion_mult_scores(sem_scores[i], prior_real[i], c["lambda"], eps), f
+
         gap_report["splits"][split] = {}
         for method in FUSION:
             recalls_by_k = {}
             for k in k_sweep:
+                hits_reuse = 0
+                for i in range(len(queries)):
+                    sc, _ = scores_for(i, method, folds)
+                    hits_reuse += recall_all(topk_ids(sc, tool_ids, k), gold_by_q[i])
                 fname = f"retrieval_{split}_{method}_real_{k}.jsonl"
-                hits = 0
+                hits_refit = 0
                 with open(os.path.join(results_dir, fname), "w", encoding="utf-8") as fh:
                     for i, q in enumerate(queries):
-                        f = str(fold_of[str(q["query_id"])])
-                        info = folds[f]
-                        c = info[method]
-                        if method == "fusion_add":
-                            sc = fusion_add_scores(sem_scores[i], prior_real[i], c["alpha"], c["beta"],
-                                                   info["zscore_mean"], info["zscore_std"])
-                        else:
-                            sc = fusion_mult_scores(sem_scores[i], prior_real[i], c["lambda"], eps)
+                        sc, f = scores_for(i, method, refit_folds)
                         cand = topk_ids(sc, tool_ids, k)
                         r = recall_all(cand, gold_by_q[i])
-                        hits += r
+                        hits_refit += r
                         fh.write(json.dumps({
                             "query_id": q["query_id"], "fold": int(f), "candidate_tools": cand,
                             "gold_tools": gold_by_q[i], "recall_all": r,
                         }, ensure_ascii=False) + "\n")
-                real_rec = round(hits / max(1, len(queries)), 4)
                 # oracle 대응 파일에서 recall 재계산 (gap)
                 op = os.path.join(results_dir, f"retrieval_{split}_{method}_oracle_{k}.jsonl")
                 orc = None
                 if os.path.isfile(op):
                     rows = _read_jsonl(op)
                     orc = round(sum(x["recall_all"] for x in rows) / max(1, len(rows)), 4)
-                recalls_by_k[k] = {"oracle": orc, "real": real_rec,
-                                   "gap": (round(orc - real_rec, 4) if orc is not None else None)}
+                nq = max(1, len(queries))
+                rr, rf = round(hits_reuse / nq, 4), round(hits_refit / nq, 4)
+                recalls_by_k[k] = {"oracle": orc, "real_reuse": rr, "real_refit": rf,
+                                   "gap_refit": (round(orc - rf, 4) if orc is not None else None)}
             gap_report["splits"][split][method] = recalls_by_k
 
-    out_path = os.path.join(results_dir, "fusion_real_gap.json")
-    with open(out_path, "w", encoding="utf-8") as f:
+    with open(os.path.join(results_dir, "fusion_real_gap.json"), "w", encoding="utf-8") as f:
         json.dump(gap_report, f, ensure_ascii=False, indent=2)
-    print(f"\n[m3:real] oracle → real Recall_all gap (fusion_real_gap.json 저장)")
+    with open(os.path.join(results_dir, "fusion_coeffs_real.json"), "w", encoding="utf-8") as f:
+        json.dump(coeffs_real, f, ensure_ascii=False, indent=2)
+    print(f"\n[m3:real] Recall_all — oracle | real(reuse 계수) | real(refit 계수). "
+          f"candidate 파일은 refit 사용. (fusion_real_gap.json 저장)")
     for split, ms in gap_report["splits"].items():
         for method, ks in ms.items():
-            line = " ".join(f"K={k}: {v['oracle']}→{v['real']} (gap {v['gap']})" for k, v in ks.items())
+            line = " ".join(f"K={k}: {v['oracle']}|{v['real_reuse']}|{v['real_refit']}" for k, v in ks.items())
             print(f"  {split} {method}: {line}")
 
 
