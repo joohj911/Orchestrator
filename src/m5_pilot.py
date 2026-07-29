@@ -142,6 +142,7 @@ def _aggregate(recs):
         "completeness": round(sum(r["completeness"] for r in recs) / n, 4),
         "recall_all": round(sum(r["recall_all"] for r in recs) / n, 4),
         "args_valid_rate": round(sum(with_valid) / len(with_valid), 4) if with_valid else None,
+        "mean_n_calls": round(sum(r["n_calls"] for r in recs) / n, 3),
         "mean_hallucinated_calls": round(sum(r["hallucinated_calls"] for r in recs) / n, 3),
         "mean_prompt_tokens": round(sum(r["prompt_tokens"] for r in recs) / n, 1),
         "miss_type_counts": dict(miss_counts),
