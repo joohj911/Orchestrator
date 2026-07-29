@@ -17,11 +17,19 @@ CLI: python m5_pilot.py --config config.yaml [--force] [--smoke]
 #   func_acc/completeness/miss_type/parse_ok/prompt_tokens 는 gold_tools 로 계산.
 
 retriever 영향 귀속 (pilot_report.json 에 포함):
-  - per_condition_metrics: 조건별 func_acc/completeness/recall_all/miss_type 집계.
+  - per_condition_metrics: 조건별 func_acc/exact_match/strict_success/completeness/
+      recall_all/args_valid_rate/hallucinated/miss_type 집계.
   - retrieval_effect: retrieved_* 조건마다
-      vs_full / vs_random_k — 같은 쿼리 짝 비교 Δfunc_acc + 도움/해악 쿼리 수
-      func_acc_given_recall_hit/miss — retriever 성공/실패 시 downstream 조건부 성능.
+      vs_full / vs_random_k — 같은 쿼리 짝 비교 Δ + 도움/해악 쿼리 수 (strict 기준)
+      *_given_recall_hit/miss — retriever 성공/실패 시 downstream 조건부 성능.
     (조건 간 프롬프트·디코딩 동일, candidate 만 다르므로 이 짝 비교가 retriever 의 인과 효과.)
+
+성공 기준 계층 (spec func_acc 는 유지, 엄격 보조 지표 추가):
+  func_acc(관대: gold 가 호출 목록에 포함되면 성공)
+    ⊃ exact_match(정확히 gold 만 호출, 난사·hallucination 실패)
+    ⊃ strict_success(exact ∧ 호출이 스키마상 실행 가능 — required 충족·미정의 인자 없음·타입 OK)
+  인자 '값'의 의미적 정답(진짜 실행 성공)은 gold 인자가 없어 매칭 불가 — M6 에서
+  LLM judge 보강 여부 결정 (# DECISION NEEDED).
 """
 from __future__ import annotations
 
@@ -36,7 +44,7 @@ from typing import Any
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from utils.config import load_config  # noqa: E402
 from utils.qwen_tools import build_prompt, parse_tool_calls, classify_generation, sanitize_name, to_openai_schema  # noqa: E402
-from utils.scoring import score_func, score_completeness, recall_all  # noqa: E402
+from utils.scoring import score_func, score_completeness, recall_all, score_exact, validate_call  # noqa: E402
 
 # 축 A 조건 + 축 B 방법 (retrieved_k 에 적용). fusion 은 M3 에서 oracle prior.
 RETRIEVAL_METHODS = ["bm25", "dense_single", "dense_multi", "fusion_add_oracle", "fusion_mult_oracle"]
@@ -107,11 +115,16 @@ def _aggregate(recs):
     if not n:
         return {}
     miss_counts = Counter(r["miss_type"] for r in recs if r["miss_type"])
+    with_valid = [r["args_valid"] for r in recs if r.get("args_valid") is not None]
     return {
         "n": n,
         "func_acc": round(sum(r["func_acc"] for r in recs) / n, 4),
+        "exact_match": round(sum(r["exact_match"] for r in recs) / n, 4),
+        "strict_success": round(sum(r["strict_success"] for r in recs) / n, 4),
         "completeness": round(sum(r["completeness"] for r in recs) / n, 4),
         "recall_all": round(sum(r["recall_all"] for r in recs) / n, 4),
+        "args_valid_rate": round(sum(with_valid) / len(with_valid), 4) if with_valid else None,
+        "mean_hallucinated_calls": round(sum(r["hallucinated_calls"] for r in recs) / n, 3),
         "mean_prompt_tokens": round(sum(r["prompt_tokens"] for r in recs) / n, 1),
         "miss_type_counts": dict(miss_counts),
     }
@@ -124,8 +137,10 @@ def _retrieval_effect(recs_by_cond):
     쿼리 단위 짝 비교가 retriever 의 인과 효과다.
       - vs_full     : retriever 를 껴서 좋아졌나/나빠졌나 (좁히기+랭킹 합산 효과).
       - vs_random_k : 단순 좁히기 대비 retriever 랭킹의 기여.
-      - func_acc_given_recall_hit/miss : retriever 가 gold 를 살렸을 때 모델이 잘 쓰는지,
+      - *_given_recall_hit/miss : retriever 가 gold 를 살렸을 때 모델이 잘 쓰는지,
         놓쳤을 때 downstream 이 같이 죽는지 (원인 귀속).
+    도움/해악 판정은 strict_success 기준 (gold 포함 호출이면 무조건 성공으로 치는
+    관대한 func_acc 가 아니라, 정확히 gold 만 + 실행 가능하게 호출했는지).
     """
     effects = {}
     baselines = {b: {str(r["query_id"]): r for r in recs_by_cond.get(b, [])}
@@ -135,32 +150,42 @@ def _retrieval_effect(recs_by_cond):
             continue
         hit = [r for r in recs if r["recall_all"] == 1]
         miss = [r for r in recs if r["recall_all"] == 0]
+
+        def _mean(rows, key):
+            return round(sum(r[key] for r in rows) / len(rows), 4) if rows else None
+
         eff = {
             "recall_all": round(len(hit) / len(recs), 4),
-            "func_acc_given_recall_hit": round(sum(r["func_acc"] for r in hit) / len(hit), 4) if hit else None,
-            "func_acc_given_recall_miss": round(sum(r["func_acc"] for r in miss) / len(miss), 4) if miss else None,
+            "func_acc_given_recall_hit": _mean(hit, "func_acc"),
+            "func_acc_given_recall_miss": _mean(miss, "func_acc"),
+            "strict_success_given_recall_hit": _mean(hit, "strict_success"),
+            "strict_success_given_recall_miss": _mean(miss, "strict_success"),
         }
         for bname, base in baselines.items():
             if not base:
                 continue
+            # 도움/해악은 strict_success(난사·실행불가까지 실패로 보는 엄격 기준) 기준.
+            # func_acc(spec 지표) 델타도 함께 기록해 관대/엄격 기준 차이를 드러낸다.
             helped = hurt = 0
-            deltas = []
+            d_func, d_strict = [], []
             for r in recs:
                 br = base.get(str(r["query_id"]))
                 if br is None:
                     continue
-                d = r["func_acc"] - br["func_acc"]
-                deltas.append(d)
-                if d > 0:
+                d_func.append(r["func_acc"] - br["func_acc"])
+                ds = r["strict_success"] - br["strict_success"]
+                d_strict.append(ds)
+                if ds > 0:
                     helped += 1
-                elif d < 0:
+                elif ds < 0:
                     hurt += 1
-            if deltas:
+            if d_strict:
                 eff[f"vs_{bname}"] = {
-                    "delta_func_acc": round(sum(deltas) / len(deltas), 4),
+                    "delta_func_acc": round(sum(d_func) / len(d_func), 4),
+                    "delta_strict_success": round(sum(d_strict) / len(d_strict), 4),
                     "helped_queries": helped,
                     "hurt_queries": hurt,
-                    "unchanged_queries": len(deltas) - helped - hurt,
+                    "unchanged_queries": len(d_strict) - helped - hurt,
                 }
         effects[cond] = eff
     return effects
@@ -194,11 +219,28 @@ def run_model(runner, model_key, cfg, tools_by_id, all_ids, queries, retrieved, 
             called_ids = [rev[c["name"]] for c in calls if c.get("name") in rev]
             fa = score_func(called_ids, gold, split)
             comp, miss = score_completeness(called_ids, gold, cand_ids)
+            # 엄격 지표 (spec func_acc 보완): 난사·hallucination·실행 불가 호출을 실패로.
+            #   hallucinated: candidate 에 없는 함수명을 지어낸 호출 (full 조건에서 특히 관찰 대상).
+            #   exact_match : 호출 집합 == gold 집합, hallucination 도 실패.
+            #   args_valid  : gold tool 호출이 스키마상 실행 가능한 비율 (required 충족 등).
+            #   strict_success = exact_match ∧ args_valid=1 — gold 인자 없이 잴 수 있는 최엄격 성공.
+            schema_by_name = {s["function"]["name"]: s for s in schemas}
+            hallucinated = sum(1 for c in calls if c.get("name") not in rev)
+            gold_set = set(gold)
+            gold_call_valids = [
+                validate_call(c.get("arguments"), schema_by_name[c["name"]])["valid"]
+                for c in calls if c.get("name") in rev and rev[c["name"]] in gold_set
+            ]
+            args_valid = (sum(gold_call_valids) / len(gold_call_valids)) if gold_call_valids else None
+            exact = float(score_exact(called_ids, gold) == 1.0 and hallucinated == 0)
+            strict = float(exact == 1.0 and args_valid == 1.0)
             recs.append({
                 "query_id": q["query_id"], "condition": cond, "n_candidates": len(cand_ids),
                 "called_tools": called_ids, "parse_ok": parse_ok, "gen_status": status,
                 "func_acc": fa, "arg_acc": None, "completeness": comp, "miss_type": miss,
                 "recall_all": recall_all(cand_ids, gold),
+                "n_calls": len(calls), "hallucinated_calls": hallucinated,
+                "exact_match": exact, "args_valid": args_valid, "strict_success": strict,
                 "prompt_tokens": runner.prompt_tokens(prompt),
             })
         per_cond_status[cond] = dict(cstat)
@@ -256,14 +298,16 @@ def run(config_path, force, runner_factory=None):
         r = report["models"][model_key]
         print(f"[m5] {model_key} 파싱 성공률 {r['parse_rate']} (상태 {r['status_counts']})")
         for cond, m in r["per_condition_metrics"].items():
-            print(f"[m5]   {cond}: func_acc {m.get('func_acc')} comp {m.get('completeness')} "
-                  f"recall_all {m.get('recall_all')} miss {m.get('miss_type_counts')}")
+            print(f"[m5]   {cond}: func_acc {m.get('func_acc')} exact {m.get('exact_match')} "
+                  f"strict {m.get('strict_success')} recall_all {m.get('recall_all')} "
+                  f"halluc {m.get('mean_hallucinated_calls')} miss {m.get('miss_type_counts')}")
         for cond, eff in r["retrieval_effect"].items():
             vf = eff.get("vs_full", {})
-            print(f"[m5]   [효과] {cond}: Δfunc_acc(vs full) {vf.get('delta_func_acc')} "
+            print(f"[m5]   [효과] {cond}: Δstrict(vs full) {vf.get('delta_strict_success')} "
+                  f"Δfunc {vf.get('delta_func_acc')} "
                   f"(도움 {vf.get('helped_queries')} / 해악 {vf.get('hurt_queries')}), "
-                  f"recall hit/miss 시 func_acc {eff.get('func_acc_given_recall_hit')}/"
-                  f"{eff.get('func_acc_given_recall_miss')}")
+                  f"recall hit/miss 시 strict {eff.get('strict_success_given_recall_hit')}/"
+                  f"{eff.get('strict_success_given_recall_miss')}")
 
     with open(os.path.join(results_dir, "pilot_report.json"), "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
@@ -319,15 +363,22 @@ def _smoke():
     # retriever 영향 리포트: 조건별 집계 + retrieved_* 의 baseline 짝 비교가 있어야 함.
     pcm = rep["models"]["weak"]["per_condition_metrics"]
     assert set(pcm) == set(rep["conditions"]) and all("recall_all" in m for m in pcm.values()), pcm
+    # 엄격 지표: mock 은 항상 첫 candidate 만 (스키마 유효 인자로) 1회 호출.
+    #   random_k/oracle 은 gold 가 첫 candidate → exact=strict=1. 인자 q(required) 채움 → args_valid=1.
+    assert pcm["oracle_tool"]["strict_success"] == 1.0 and pcm["oracle_tool"]["exact_match"] == 1.0, pcm["oracle_tool"]
+    assert pcm["full"]["strict_success"] == 0.25 and pcm["full"]["args_valid_rate"] == 1.0, pcm["full"]
+    assert pcm["full"]["mean_hallucinated_calls"] == 0.0, pcm["full"]
     eff = rep["models"]["weak"]["retrieval_effect"]
     assert eff and all(c.startswith("retrieved_") for c in eff), eff
     e0 = next(iter(eff.values()))
     assert "vs_full" in e0 and "vs_random_k" in e0 and "delta_func_acc" in e0["vs_full"], e0
+    assert "delta_strict_success" in e0["vs_full"] and "strict_success_given_recall_hit" in e0, e0
     # mock candidate=[t0,t1,t2] 고정: gold=t3 인 쿼리 1개만 recall miss.
     assert e0["recall_all"] == 0.75, e0
-    # 레코드에도 recall_all 필드가 기록됐는지.
+    # 레코드에도 새 필드가 기록됐는지.
     rows = [json.loads(l) for l in open(f"{d}/out/results/downstream_pilot_weak_retrieved_bm25_K10.jsonl")]
-    assert all("recall_all" in r for r in rows), rows[0]
+    need = {"recall_all", "n_calls", "hallucinated_calls", "exact_match", "args_valid", "strict_success"}
+    assert all(need <= set(r) for r in rows), rows[0]
     print(f"[smoke] OK — 조건 {len(rep['conditions'])}, parse_rate {rep['models']['weak']['parse_rate']}, "
           f"retrieval_effect {list(eff)}")
 

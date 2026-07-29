@@ -48,16 +48,18 @@ def main() -> None:
     for k, m in models.items():
         print(f"  {k}={m.get('model_id')} 파싱성공률 {m.get('parse_rate')} 상태 {m.get('status_counts')}")
         # 사람 확인용(게이트 아님): 방향 상식성 — full ≤ oracle_tool 인지, retriever 가 도움/해악인지.
+        # strict_success = 정확히 gold 만 + 스키마상 실행 가능하게 호출 (관대한 func_acc 와 구분).
         for cond, cm in (m.get("per_condition_metrics") or {}).items():
-            print(f"    {cond}: func_acc {cm.get('func_acc')} comp {cm.get('completeness')} "
-                  f"recall_all {cm.get('recall_all')} miss {cm.get('miss_type_counts')}")
+            print(f"    {cond}: func_acc {cm.get('func_acc')} exact {cm.get('exact_match')} "
+                  f"strict {cm.get('strict_success')} recall_all {cm.get('recall_all')} "
+                  f"halluc {cm.get('mean_hallucinated_calls')} miss {cm.get('miss_type_counts')}")
         for cond, eff in (m.get("retrieval_effect") or {}).items():
             vf, vr = eff.get("vs_full", {}), eff.get("vs_random_k", {})
-            print(f"    [효과] {cond}: Δ(vs full) {vf.get('delta_func_acc')} "
+            print(f"    [효과] {cond}: Δstrict(vs full) {vf.get('delta_strict_success')} "
                   f"(도움 {vf.get('helped_queries')}/해악 {vf.get('hurt_queries')}) | "
-                  f"Δ(vs random_k) {vr.get('delta_func_acc')} | "
-                  f"recall hit/miss 시 {eff.get('func_acc_given_recall_hit')}/"
-                  f"{eff.get('func_acc_given_recall_miss')}")
+                  f"Δstrict(vs random_k) {vr.get('delta_strict_success')} | "
+                  f"recall hit/miss 시 strict {eff.get('strict_success_given_recall_hit')}/"
+                  f"{eff.get('strict_success_given_recall_miss')}")
 
     excluded, hyp_unverifiable = [], False
     # 우선순위: 2B(weak) 미달 → 제외 + 가설 검증불가 플래그.

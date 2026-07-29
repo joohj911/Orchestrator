@@ -6,6 +6,8 @@
   score_completeness(called_set, gold_set, candidate_set) -> (completeness, miss_type)
     # miss_type: 'retrieval_miss'(gold∉candidate) | 'generation_miss'(gold∈candidate,미호출) | None
   recall_all(candidate_ids, gold_ids) -> 0/1   # gold ⊆ candidate
+  score_exact(called, gold) -> 0/1             # 호출 집합 == gold 집합 (여분 호출도 실패)
+  validate_call(arguments, function_schema) -> dict  # 스키마 수준 실행 가능성 (BFCL AST 체크류)
 
 구현: Claude Code. 상세 규칙 spec/rules/scoring.md.
 
@@ -15,6 +17,7 @@ gold tool id 와 모델이 호출한 함수명을 동일 변환(utils.qwen_tools
 """
 from __future__ import annotations
 
+import json
 from typing import Any, Iterable
 
 # multi-tool split (I2/I3). I1 은 single-tool.
@@ -57,6 +60,90 @@ def score_func(called: Iterable[Any], gold: Iterable[Any], split: str) -> float:
         return 0.0
     correct = sum(1 for n in called_names if n in gold_names)
     return correct / len(called_names)
+
+
+def score_exact(called: Iterable[Any], gold: Iterable[Any]) -> float:
+    """엄격 함수 정확도: 호출 집합이 gold 집합과 정확히 일치해야 1.0.
+
+    func_acc(I1: any-포함)와 달리 여분 호출(gold 외 tool 난사)도 실패로 본다.
+    "후보가 적어 고르기 쉬워진다"는 효과를 엄격 기준으로 재는 보조 지표.
+    호출측이 hallucinated call(후보에 없는 이름)을 별도 집계한다면 그 존재 시
+    exact 도 0 으로 처리하는 것은 호출측 책임 (이 함수는 넘어온 집합만 비교).
+    """
+    called_names = set(_names(called))
+    gold_names = set(_names(gold))
+    return float(bool(called_names) and called_names == gold_names)
+
+
+def _value_coercible(value: Any, json_type: str) -> bool:
+    """값이 선언된 JSON Schema type 으로 해석 가능한가.
+
+    Qwen XML 파서는 모든 인자 값을 문자열로 돌려주므로, 문자열이면 타입 강제
+    (coercion) 가능 여부로 판정한다 ("5" 는 integer 로 유효).
+    """
+    if json_type == "string":
+        return True
+    if isinstance(value, str):
+        s = value.strip()
+        try:
+            if json_type == "integer":
+                int(s)
+                return True
+            if json_type == "number":
+                float(s)
+                return True
+            if json_type == "boolean":
+                return s.lower() in ("true", "false")
+            if json_type == "array":
+                return isinstance(json.loads(s), list)
+            if json_type == "object":
+                return isinstance(json.loads(s), dict)
+        except (ValueError, json.JSONDecodeError):
+            return False
+        return True  # 알 수 없는 타입명 → 관대하게 통과
+    if json_type == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if json_type == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if json_type == "boolean":
+        return isinstance(value, bool)
+    if json_type == "array":
+        return isinstance(value, list)
+    if json_type == "object":
+        return isinstance(value, dict)
+    return True
+
+
+def validate_call(arguments: dict[str, Any] | None, function_schema: dict[str, Any]) -> dict[str, Any]:
+    """스키마 수준 실행 가능성 검증 (gold 인자 값 불필요, BFCL AST 체크와 같은 발상).
+
+    모델에게 보여준 OpenAI function 스키마 그대로에 대해:
+      - required 파라미터가 전부 채워졌는가
+      - 스키마에 없는 파라미터를 지어내지 않았는가
+      - 값이 선언 타입으로 해석 가능한가
+    를 판정한다. 값이 '의미적으로 정답'인지는 판정하지 않는다 (gold 인자 없음 —
+    그건 arg_acc 의 영역, M6 결정 사항).
+
+    반환: {valid, missing_required, unknown_params, bad_types}
+    """
+    fn = function_schema.get("function", function_schema)
+    params = fn.get("parameters", {}) or {}
+    props = params.get("properties", {}) or {}
+    required = params.get("required", []) or []
+    args = arguments or {}
+
+    missing = [r for r in required if r not in args]
+    unknown = [k for k in args if k not in props]
+    bad_types = [
+        k for k, v in args.items()
+        if k in props and not _value_coercible(v, str(props[k].get("type", "string")))
+    ]
+    return {
+        "valid": not (missing or unknown or bad_types),
+        "missing_required": missing,
+        "unknown_params": unknown,
+        "bad_types": bad_types,
+    }
 
 
 def _normalize_value(v: Any) -> str:
