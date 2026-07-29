@@ -46,8 +46,11 @@ from utils.config import load_config  # noqa: E402
 from utils.qwen_tools import build_prompt, parse_tool_calls, classify_generation, sanitize_name, to_openai_schema  # noqa: E402
 from utils.scoring import score_func, score_completeness, recall_all, score_exact, validate_call  # noqa: E402
 
-# 축 A 조건 + 축 B 방법 (retrieved_k 에 적용). fusion 은 M3 에서 oracle prior.
-RETRIEVAL_METHODS = ["bm25", "dense_single", "dense_multi", "fusion_add_oracle", "fusion_mult_oracle"]
+# 축 A 조건 + 축 B 방법 (retrieved_k 에 적용). fusion 은 oracle prior(M3) + real prior(M4 후
+# m3 --real-prior 로 생성). real 파일이 아직 없으면 경고 후 해당 조건만 건너뛴다.
+RETRIEVAL_METHODS = ["bm25", "dense_single", "dense_multi",
+                     "fusion_add_oracle", "fusion_mult_oracle",
+                     "fusion_add_real", "fusion_mult_real"]
 
 
 def _read_jsonl(path):
@@ -275,8 +278,8 @@ def run(config_path, force, runner_factory=None):
     # M3 retrieved candidates (split, method, K)
     retrieved = {}
     for m in RETRIEVAL_METHODS:
-        fname = f"retrieval_{split}_{m}_{k}.jsonl" if not m.endswith("_oracle") else \
-                f"retrieval_{split}_{m[:-7]}_oracle_{k}.jsonl"
+        # 파일명 규약: method 문자열이 prior 태그(_oracle/_real)까지 포함한다.
+        fname = f"retrieval_{split}_{m}_{k}.jsonl"
         path = os.path.join(results_dir, fname)
         if os.path.isfile(path):
             retrieved[m] = {str(r["query_id"]): r["candidate_tools"] for r in _read_jsonl(path)}

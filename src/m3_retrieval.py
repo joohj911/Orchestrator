@@ -92,6 +92,23 @@ def oracle_prior_matrix(query_gold_cats, tool_cats):
     return out
 
 
+def real_prior_matrix(prior_by_qid, query_ids, tool_cats):
+    """class_prior_real.jsonl(M4)의 category 확률을 tool 축으로 펼친 prior 행렬.
+
+    반환: (행렬, prior 가 없는 쿼리 수). prior 없는 쿼리는 0 행
+    (fusion_mult 는 eps 바닥이 있어 semantic 순위 유지, fusion_add 는 prior 항 0).
+    """
+    out = np.zeros((len(query_ids), len(tool_cats)), dtype=np.float32)
+    missing = 0
+    for i, qid in enumerate(query_ids):
+        pr = prior_by_qid.get(str(qid))
+        if pr is None:
+            missing += 1
+            continue
+        out[i] = np.array([float(pr.get(c, 0.0)) for c in tool_cats], dtype=np.float32)
+    return out, missing
+
+
 def zscore_fit(values):
     mean = float(np.mean(values))
     std = float(np.std(values))
@@ -274,6 +291,111 @@ def run(config_path: str, force: bool) -> None:
     print("[m3] fusion_coeffs.json 저장. 완료 (모든 쿼리 test, fold 별 계수).")
 
 
+def run_real_prior(config_path: str, force: bool) -> None:
+    """prior=real(M4 classifier 확률) fusion candidate 생성 + oracle→real recall gap 리포트.
+
+    LLM 불필요 — M6 전에 "classifier 가 병목인가"를 recall 수준에서 먼저 판단하는 용도.
+    산출물:
+      results/retrieval_{split}_{fusion_add,fusion_mult}_real_{K}.jsonl (M5/M6 이 읽음)
+      results/fusion_real_gap.json (split×method×K 별 oracle vs real Recall_all)
+
+    # DECISION: fold 계수·zscore 는 M3(oracle prior)에서 선택된 값을 그대로 재사용, prior 만
+    #   교체 (모듈 상단 DECISION 및 run-matrix stage2 와 일치). 계수를 고정해야 gap 이
+    #   순수하게 'prior 품질' 차이가 된다.
+    # DECISION NEEDED: real prior 는 확률(0~1 연속)이라 oracle(0/1)과 스케일이 달라, 고정
+    #   계수가 real 에 불리할 수 있음. gap 이 비정상적으로 크면 train fold 에서 real prior 로
+    #   계수 재탐색(누출 없음: classifier 는 test 를 학습에 안 씀)한 변형을 추가 검토.
+    """
+    cfg = load_config(config_path)
+    splits = cfg["experiment"]["splits"]
+    k_sweep = cfg["experiment"]["k_sweep"]
+    data_dir = cfg["paths"]["data_dir"]
+    results_dir = cfg["paths"]["results_dir"]
+    emb_dir = os.path.join(data_dir, "embeddings")
+    eps = float(cfg["fusion"]["epsilon"])
+
+    coeffs_path = os.path.join(cfg["paths"]["output_dir"], "fusion_coeffs.json")
+    prior_path = os.path.join(data_dir, "class_prior_real.jsonl")
+    for p, hint in ((coeffs_path, "m3_retrieval.py 먼저"), (prior_path, "m4_classifier.py 먼저")):
+        if not os.path.isfile(p):
+            sys.exit(f"[m3:real] 없음: {p} ({hint} 실행)")
+    coeffs = json.load(open(coeffs_path, encoding="utf-8"))
+    prior_by_qid = {str(r["query_id"]): r["prior"] for r in _read_jsonl(prior_path)}
+
+    tools = _read_jsonl(os.path.join(data_dir, "tools.jsonl"))
+    tool_ids = [t["id"] for t in tools]
+    tool_cats = [t["category"] for t in tools]
+
+    desc_npy = os.path.join(emb_dir, "tools_desc.npy")
+    ex_npy = os.path.join(emb_dir, "tools_examples.npy")
+    if not (os.path.isfile(desc_npy) and os.path.isfile(ex_npy)):
+        sys.exit(f"[m3:real] 임베딩 캐시 없음: {emb_dir} (m3_retrieval.py 본 실행 먼저)")
+    desc_mat, tool_ex_mat = np.load(desc_npy), np.load(ex_npy)
+    tool_vecs = np.concatenate([desc_mat[:, None, :], tool_ex_mat], axis=1)
+
+    gap_report: dict[str, Any] = {"splits": {}}
+    for split in splits:
+        queries = _read_jsonl(os.path.join(data_dir, f"queries_{split}.jsonl"))
+        qids = [str(q["query_id"]) for q in queries]
+        gold_by_q = [list(q["gold_tools"]) for q in queries]
+        q_npy = os.path.join(emb_dir, f"queries_{split}.npy")
+        if not os.path.isfile(q_npy):
+            sys.exit(f"[m3:real] 쿼리 임베딩 캐시 없음: {q_npy} (m3 본 실행 먼저)")
+        q_mat = np.load(q_npy)
+        sem_scores = [cosine_scores_multi(q_mat[i], tool_vecs) for i in range(len(queries))]
+
+        prior_real, n_missing = real_prior_matrix(prior_by_qid, qids, tool_cats)
+        if n_missing:
+            print(f"[m3:real] 경고: {split} prior 없는 쿼리 {n_missing}/{len(queries)} (0 처리)")
+
+        sc_split = coeffs["splits"][split]
+        fold_of = sc_split["fold_assignment"]
+        folds = sc_split["folds"]
+
+        gap_report["splits"][split] = {}
+        for method in FUSION:
+            recalls_by_k = {}
+            for k in k_sweep:
+                fname = f"retrieval_{split}_{method}_real_{k}.jsonl"
+                hits = 0
+                with open(os.path.join(results_dir, fname), "w", encoding="utf-8") as fh:
+                    for i, q in enumerate(queries):
+                        f = str(fold_of[str(q["query_id"])])
+                        info = folds[f]
+                        c = info[method]
+                        if method == "fusion_add":
+                            sc = fusion_add_scores(sem_scores[i], prior_real[i], c["alpha"], c["beta"],
+                                                   info["zscore_mean"], info["zscore_std"])
+                        else:
+                            sc = fusion_mult_scores(sem_scores[i], prior_real[i], c["lambda"], eps)
+                        cand = topk_ids(sc, tool_ids, k)
+                        r = recall_all(cand, gold_by_q[i])
+                        hits += r
+                        fh.write(json.dumps({
+                            "query_id": q["query_id"], "fold": int(f), "candidate_tools": cand,
+                            "gold_tools": gold_by_q[i], "recall_all": r,
+                        }, ensure_ascii=False) + "\n")
+                real_rec = round(hits / max(1, len(queries)), 4)
+                # oracle 대응 파일에서 recall 재계산 (gap)
+                op = os.path.join(results_dir, f"retrieval_{split}_{method}_oracle_{k}.jsonl")
+                orc = None
+                if os.path.isfile(op):
+                    rows = _read_jsonl(op)
+                    orc = round(sum(x["recall_all"] for x in rows) / max(1, len(rows)), 4)
+                recalls_by_k[k] = {"oracle": orc, "real": real_rec,
+                                   "gap": (round(orc - real_rec, 4) if orc is not None else None)}
+            gap_report["splits"][split][method] = recalls_by_k
+
+    out_path = os.path.join(results_dir, "fusion_real_gap.json")
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(gap_report, f, ensure_ascii=False, indent=2)
+    print(f"\n[m3:real] oracle → real Recall_all gap (fusion_real_gap.json 저장)")
+    for split, ms in gap_report["splits"].items():
+        for method, ks in ms.items():
+            line = " ".join(f"K={k}: {v['oracle']}→{v['real']} (gap {v['gap']})" for k, v in ks.items())
+            print(f"  {split} {method}: {line}")
+
+
 def _smoke() -> None:
     print("[smoke] m3 k-fold 로직 점검 (random 임베딩)")
     rng = np.random.default_rng(0)
@@ -303,8 +425,15 @@ def _smoke() -> None:
         cm = grid_search_fusion("fusion_mult", [sem[i] for i in tr], [prior[i] for i in tr],
                                 [set(golds[i]) for i in tr], tool_ids, fcfg, m, s)
         assert ca["alpha"] in (0.3, 0.7) and cm["lambda"] in (0.5, 1.0)
+    # real prior 행렬: category 확률 → tool 축 매핑 + prior 없는 쿼리 0 처리
+    prior_by_qid = {"0": {"A": 0.9, "B": 0.1}, "1": {"B": 0.5}}
+    mat, missing = real_prior_matrix(prior_by_qid, ["0", "1", "2"], tool_cats)
+    assert missing == 1 and mat.shape == (3, n_tools)
+    assert mat[0][0] == np.float32(0.9) and tool_cats[0] == "A"  # tool0=A → 0.9
+    assert mat[1][1] == np.float32(0.5) and tool_cats[1] == "B"  # tool1=B → 0.5
+    assert mat[2].sum() == 0.0  # prior 없음 → 0 행
     # 각 쿼리는 자기 fold(=선택 미참여) 계수로 채점됨을 구조로 보장
-    print("[smoke] OK — fold 배정 결정적/균등/전커버, fold별 계수 선택 정상")
+    print("[smoke] OK — fold 배정 결정적/균등/전커버, fold별 계수 선택, real prior 매핑 정상")
 
 
 def main() -> None:
@@ -312,9 +441,14 @@ def main() -> None:
     ap.add_argument("--config", default="config.yaml")
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--smoke", action="store_true")
+    ap.add_argument("--real-prior", action="store_true",
+                    help="M4 classifier prior 로 fusion candidate 재생성 + oracle→real gap 리포트 (M4 이후)")
     args = ap.parse_args()
     if args.smoke:
         _smoke()
+        return
+    if args.real_prior:
+        run_real_prior(args.config, args.force)
         return
     run(args.config, args.force)
 
