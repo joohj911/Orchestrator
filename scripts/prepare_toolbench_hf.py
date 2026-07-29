@@ -78,6 +78,51 @@ def distinct_gold_count(instance: dict[str, Any]) -> int:
     return len(pairs)
 
 
+# M4 classifier 학습셋: test(g*_instruction)와 겹치지 않는 미사용 서브셋.
+CLASSIFIER_SUBSETS = ["g1_category", "g1_tool", "g2_category"]
+
+
+def gold_categories_of(instance: dict[str, Any]) -> list[str]:
+    """convert_row 결과에서 gold API 들의 category 합집합을 뽑는다 (classifier 라벨)."""
+    local: dict[tuple, str] = {}
+    for e in instance.get("api_list", []) or []:
+        local[(e.get("tool_name"), e.get("api_name"))] = e.get("category_name")
+    cats = set()
+    for pair in instance.get("relevant APIs", []) or []:
+        if isinstance(pair, (list, tuple)) and len(pair) >= 2:
+            c = local.get((pair[0], pair[1]))
+            if c:
+                cats.add(c)
+    return sorted(cats)
+
+
+def write_classifier_train(ds, dest: str) -> None:
+    """미사용 서브셋 → classifier_train.jsonl {query_id, query, gold_categories}.
+
+    test(g*_instruction)와 subset 접두어가 달라 query_id 가 겹치지 않는다(누출 0).
+    """
+    from collections import Counter
+    out_path = os.path.join(dest, "classifier_train.jsonl")
+    rows, cat_freq = [], Counter()
+    for sub in CLASSIFIER_SUBSETS:
+        if sub not in ds:
+            print(f"  [경고] classifier subset '{sub}' 없음 — 건너뜀")
+            continue
+        for r in ds[sub]:
+            inst = convert_row(r, sub)
+            gcats = gold_categories_of(inst)
+            if not gcats:
+                continue
+            rows.append({"query_id": inst["query_id"], "query": inst["query"], "gold_categories": gcats})
+            cat_freq.update(gcats)
+    with open(out_path, "w", encoding="utf-8") as f:
+        for r in rows:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    print(f"[classifier] train {len(rows)} queries, {len(cat_freq)} categories → {out_path}")
+    print(f"[classifier] category 빈도 상위: {cat_freq.most_common(8)}")
+    print(f"[classifier] 최소 빈도 category (하위 5): {cat_freq.most_common()[-5:]}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="HF → ToolBench test_instruction 변환")
     ap.add_argument("--dest", default="./data/toolbench", help="toolbench_root (config 와 일치)")
@@ -124,6 +169,10 @@ def main() -> None:
     max_uniform = min(summary.get("G1", (0, 0))[0], i2_multi, i3_multi)
     print(f"  → 세 split 균형(uniform) 상한 ≈ {max_uniform}")
     print(f"    config.yaml 의 experiment.n_queries_per_split 를 이 값 이하로 설정 후 M1 실행.")
+
+    # M4 classifier 학습셋도 함께 생성 (test 와 disjoint).
+    print("\n--- classifier 학습셋 (M4용, test 와 겹치지 않음) ---")
+    write_classifier_train(ds, args.dest)
 
 
 if __name__ == "__main__":
