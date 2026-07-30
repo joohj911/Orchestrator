@@ -130,6 +130,11 @@ prompt:
   # v1: "You have access to a set of tools. Use the appropriate tool(s) with the
   #      correct arguments to fulfill the user's request."
   system_instruction: "You have access to a set of tools. You must fulfill the user's request by calling the appropriate tool(s) with the correct arguments. Always respond with at least one tool call. Do not answer in plain text and do not ask clarifying questions."
+  # Qwen3.5 thinking 모드 (2026-07 파일럿 실측): 기본 ON 상태에서 9B 가 <think> 추론으로
+  # max_new_tokens 를 소진 → no_call 29%, 파싱 게이트 붕괴. 전 조건·전 모델 동일하게 OFF.
+  # (thinking 을 살리려면 true + max_new_tokens 대폭 상향이 필요하나, 이 실험의 측정
+  #  대상은 tool 선택이므로 OFF 가 기본. 변경 시 전체 재실행 필요.)
+  enable_thinking: false
 
 pilot:
   # M5 파일럿: 소규모 사전 검증

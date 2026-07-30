@@ -54,6 +54,7 @@ def build_prompt(
     query: str,
     tool_schemas: list[dict[str, Any]],
     system_prompt: str | None = None,
+    template_kwargs: dict[str, Any] | None = None,
 ):
     """chat template 로 프롬프트 문자열을 만든다 (tokenize=False).
 
@@ -72,6 +73,11 @@ def build_prompt(
     반환: 렌더된 프롬프트 문자열. 배치/토크나이즈는 호출측(m5/m6)이 담당해
     padding·디코딩 파라미터를 조건 간 동일하게 통제한다.
     """
+    # template_kwargs: chat template 에 그대로 전달되는 변수 (예: enable_thinking).
+    # DECISION (2026-07 파일럿 실측): Qwen3.5 template 은 thinking 기본 ON — 9B 가
+    #   <think> 추론으로 max_new_tokens(512)를 소진해 no_call 29%, 파싱 게이트 붕괴.
+    #   이 실험은 tool 선택 측정이 목적이므로 config.prompt.enable_thinking=false 로
+    #   전 조건·전 모델 동일하게 끈다 (조건 격리 유지, 속도도 대폭 개선).
     messages: list[dict[str, str]] = []
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
@@ -81,6 +87,7 @@ def build_prompt(
         tools=tool_schemas,
         add_generation_prompt=True,
         tokenize=False,
+        **(template_kwargs or {}),
     )
 
 

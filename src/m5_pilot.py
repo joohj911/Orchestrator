@@ -152,6 +152,12 @@ class QwenRunner:
         self.tok.padding_side = "left"
         if self.tok.pad_token_id is None:
             self.tok.pad_token = self.tok.eos_token
+        # 턴 종료 토큰 등록: <|im_end|> 가 eos 로 안 걸리면 모델이 가짜 후속 턴을
+        # 계속 생성한다 (2026-07 파일럿 실측 — im_end 후 user 턴 이어 생성).
+        eos_ids = {self.tok.eos_token_id}
+        if "<|im_end|>" in (self.tok.get_vocab() or {}):
+            eos_ids.add(self.tok.convert_tokens_to_ids("<|im_end|>"))
+        self.eos_ids = sorted(t for t in eos_ids if isinstance(t, int) and t >= 0)
         dtype = {"bfloat16": torch.bfloat16, "float16": torch.float16, "float32": torch.float32}.get(
             str(hw.get("dtype", "bfloat16")), torch.bfloat16)
         # v5: dtype 인자. device_map 로 GPU 배치.
@@ -171,6 +177,7 @@ class QwenRunner:
                 **inputs, do_sample=bool(self.dec["do_sample"]),
                 max_new_tokens=int(self.dec["max_new_tokens"]),
                 temperature=(None if not self.dec["do_sample"] else float(self.dec["temperature"])),
+                eos_token_id=(self.eos_ids or None),
                 pad_token_id=self.tok.pad_token_id or self.tok.eos_token_id)
         start = inputs["input_ids"].shape[1]  # left padding → 전 시퀀스 동일 시작점
         return [self.tok.decode(o[start:], skip_special_tokens=True) for o in out]
@@ -273,6 +280,9 @@ def run_model(runner, model_key, cfg, tools_by_id, all_ids, queries, retrieved, 
     hw = cfg.get("hardware", {})
     gen_bs = int(hw.get("batch_size_gen", 8))
     gen_btok = int(hw.get("gen_batch_tokens", 40000))
+    tmpl_kwargs = {}
+    if cfg.get("prompt", {}).get("enable_thinking") is not None:
+        tmpl_kwargs["enable_thinking"] = bool(cfg["prompt"]["enable_thinking"])
 
     for cond in conditions:
         rng = random.Random(cfg["seed"])
@@ -285,7 +295,8 @@ def run_model(runner, model_key, cfg, tools_by_id, all_ids, queries, retrieved, 
             gold = gold_by_q[qid]
             cand_ids = build_candidates(cond, qid, gold, all_ids, retrieved, k, rng)
             schemas = [to_openai_schema(tools_by_id[c]) for c in cand_ids if c in tools_by_id]
-            prompt = build_prompt(runner.tok, q["query"], schemas, system_prompt=system_prompt)
+            prompt = build_prompt(runner.tok, q["query"], schemas, system_prompt=system_prompt,
+                                  template_kwargs=tmpl_kwargs or None)
             items.append({"q": q, "gold": gold, "cand_ids": cand_ids, "schemas": schemas,
                           "prompt": prompt, "ptok": runner.prompt_tokens(prompt)})
         # 2) 토큰 예산 기반 배치 (full 조건처럼 프롬프트가 길면 배치가 자동으로 작아짐)
@@ -351,7 +362,8 @@ def run(config_path, force, runner_factory=None):
     conditions = ["full", "random_k", "oracle_tool"] + [f"retrieved_{m}" for m in RETRIEVAL_METHODS if m in retrieved]
 
     report = {"split": split, "k": k, "conditions": conditions,
-              "decoding": cfg["decoding"], "system_prompt": system_prompt, "models": {}}
+              "decoding": cfg["decoding"], "system_prompt": system_prompt,
+              "enable_thinking": cfg.get("prompt", {}).get("enable_thinking"), "models": {}}
     factory = runner_factory or (lambda mid: QwenRunner(mid, cfg))
     for model_key in ("weak", "strong"):
         mid = cfg["models"]["downstream"][model_key]
@@ -405,7 +417,7 @@ def _smoke():
         def __init__(self, mid):
             self.model_id = mid
             class T:
-                def apply_chat_template(self, messages, tools, add_generation_prompt, tokenize):
+                def apply_chat_template(self, messages, tools, add_generation_prompt, tokenize, **kw):
                     return "PROMPT " + " ".join(t["function"]["name"] for t in tools)
                 def __call__(self, text, **kw):
                     class O: input_ids = text.split()

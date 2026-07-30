@@ -62,6 +62,9 @@ def run_condition(runner, model_key, split, cond, k, queries, tools_by_id, all_i
     hw = cfg.get("hardware", {})
     gen_bs = int(hw.get("batch_size_gen", 8))
     gen_btok = int(hw.get("gen_batch_tokens", 40000))
+    tmpl_kwargs = {}
+    if cfg.get("prompt", {}).get("enable_thinking") is not None:
+        tmpl_kwargs["enable_thinking"] = bool(cfg["prompt"]["enable_thinking"])
 
     items = []
     for q in queries:
@@ -69,7 +72,8 @@ def run_condition(runner, model_key, split, cond, k, queries, tools_by_id, all_i
         gold = list(q["gold_tools"])
         cand_ids = build_candidates(cond, qid, gold, all_ids, retrieved, k, None)
         schemas = [to_openai_schema(tools_by_id[c]) for c in cand_ids if c in tools_by_id]
-        prompt = build_prompt(runner.tok, q["query"], schemas, system_prompt=system_prompt)
+        prompt = build_prompt(runner.tok, q["query"], schemas, system_prompt=system_prompt,
+                              template_kwargs=tmpl_kwargs or None)
         items.append({"q": q, "gold": gold, "cand_ids": cand_ids, "schemas": schemas,
                       "prompt": prompt, "ptok": runner.prompt_tokens(prompt)})
 
@@ -200,7 +204,7 @@ def _smoke():
         def __init__(self, mid):
             self.model_id = mid
             class T:
-                def apply_chat_template(self, messages, tools, add_generation_prompt, tokenize):
+                def apply_chat_template(self, messages, tools, add_generation_prompt, tokenize, **kw):
                     return "PROMPT " + " ".join(t["function"]["name"] for t in tools)
                 def __call__(self, text, **kw):
                     class O: input_ids = text.split()
