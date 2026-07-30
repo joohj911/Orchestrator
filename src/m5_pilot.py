@@ -120,6 +120,8 @@ def score_generation(gen: str, cand_ids, schemas, gold, split) -> dict:
         "recall_all": recall_all(cand_ids, gold),
         "n_calls": len(calls), "hallucinated_calls": hallucinated,
         "exact_match": exact, "args_valid": args_valid, "strict_success": strict,
+        # 파싱 실패(no_call/malformed) 원인 추적용 생성 원문 발췌. ok 면 None (용량 절약).
+        "gen_excerpt": (gen[:1500] if status != "ok" else None),
     }
 
 
