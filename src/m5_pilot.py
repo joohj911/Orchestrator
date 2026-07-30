@@ -328,7 +328,11 @@ def run_model(runner, model_key, cfg, tools_by_id, all_ids, queries, retrieved, 
 
     total = sum(status_counter.values())
     parse_rate = status_counter["ok"] / total if total else 0.0
+    attempts = status_counter["ok"] + status_counter["malformed"]
     return {"model_id": runner.model_id, "n": total, "parse_rate": round(parse_rate, 4),
+            # 게이트 지표(2026-07 재정의): 파서 무결성. no_call 은 행동 지표로 분리.
+            "structural_parse_rate": round(status_counter["ok"] / attempts, 4) if attempts else 0.0,
+            "no_call_rate": round(status_counter["no_call"] / total, 4) if total else 0.0,
             "status_counts": dict(status_counter), "per_condition_status": per_cond_status,
             "per_condition_metrics": {c: _aggregate(r) for c, r in recs_by_cond.items()},
             "retrieval_effect": _retrieval_effect(recs_by_cond)}

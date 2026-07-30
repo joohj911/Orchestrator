@@ -22,7 +22,10 @@
 
 ## M5 파일럿 (src/m5_pilot.py)
 - 범위: I1, K=10, 전 방법, 2B+9B.
-- **파싱 성공률 측정.** 모델별 성공률 < config.pilot.parse_success_threshold(0.90)이면 자동 제외.
+- **구조적 파싱 성공률 측정** = ok/(ok+malformed). 모델별 성공률 <
+  config.pilot.parse_success_threshold(0.90)이면 자동 제외.
+  - no_call(호출 없이 답변)은 게이트가 아니라 행동 지표 — 채점(0점)에 이미 반영,
+    모델별·조건별 비율을 보고 (재정의 2026-07-30, 근거는 verify_m5 docstring).
   - 우선순위: 2B 제외. 9B도 미달이면 중단·보고.
   - 2B 제외 시 "2B/9B 가설 검증 불가" 플래그 기록.
 
