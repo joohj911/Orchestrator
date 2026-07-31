@@ -108,6 +108,14 @@ classifier:
     max_length: 128                # 질의 토큰 상한
     early_stop_patience: 5
 
+cluster_prior:
+  # 추가 실험 (보고서 7절): category 대신 tool 임베딩 k-means cluster 를 prior 단위로.
+  # scripts/experiment_cluster_prior.py 가 사용. GPU 불필요 (임베딩 캐시 재사용).
+  ks: [42, 64, 128, 256]          # cluster 개수 sweep. 42 = category 개수와 동일 굵기 대조군
+  centroid_temperature: 0.05      # zero-shot centroid prior 의 softmax 온도
+                                  # DECISION NEEDED: e5 코사인이 압축돼 있어 낮은 온도로 대비를
+                                  # 키움. 결과가 온도에 민감하면 {0.02, 0.05, 0.1} sweep.
+
 analysis:
   # M6 분석(m6_analysis.py) 파라미터.
   headline_k: 10                  # 표1·표2 의 downstream 지표를 읽는 대표 K (그림1 은 전체 sweep)
