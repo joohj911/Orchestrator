@@ -162,3 +162,8 @@ contrastive:
   n_targets: 150                  # 혼동 밀집 상위 tool 수 (파일럿 범위)
   n_neighbors: 5                  # tool당 기록할 혼동 이웃 수
   examples_per_tool: 3            # tool당 추가할 contrastive 예시 수
+
+query_split:
+  # 추가 실험: 규칙 기반 멀티 인텐트 분해 (ToolQP 계열 아이디어, LLM 0).
+  # scripts/experiment_query_split.py 가 사용.
+  min_words: 4                    # 이보다 짧은 세그먼트는 앞 세그먼트에 병합 (파편화 방지)
