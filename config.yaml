@@ -149,3 +149,9 @@ pilot:
   split: "I1"
   k: 10
   parse_success_threshold: 0.90   # 이 미만이면 해당 모델 제외 (weak=2B 우선 제외)
+
+slm_prior:
+  # 추가 실험: SLM zero-shot category prior (무학습·무로그 후보).
+  # scripts/experiment_slm_prior.py 가 사용. 폐쇄 선택(목록에서 verbatim)으로 제약.
+  model_key: "weak"               # models.downstream 키 (weak=2B — 배포 시나리오와 동일 모델)
+  max_categories: 4               # 쿼리당 선택 상한 (I3 가 2~3 category 이므로 여유 1)
