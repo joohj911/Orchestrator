@@ -155,3 +155,10 @@ slm_prior:
   # scripts/experiment_slm_prior.py 가 사용. 폐쇄 선택(목록에서 verbatim)으로 제약.
   model_key: "weak"               # models.downstream 키 (weak=2B — 배포 시나리오와 동일 모델)
   max_categories: 4               # 쿼리당 선택 상한 (I3 가 2~3 category 이므로 여유 1)
+
+contrastive:
+  # 추가 실험: contrastive 예시 파일럿 (Representation Sharpening 계열).
+  # scripts/prepare_contrastive_targets.py 가 대상 선정에 사용.
+  n_targets: 150                  # 혼동 밀집 상위 tool 수 (파일럿 범위)
+  n_neighbors: 5                  # tool당 기록할 혼동 이웃 수
+  examples_per_tool: 3            # tool당 추가할 contrastive 예시 수
