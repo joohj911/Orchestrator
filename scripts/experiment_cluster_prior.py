@@ -83,14 +83,81 @@ def oracle_cluster_prior(queries, tool_ids, labels, gold_by_q):
     return out
 
 
-def centroid_prior(q_mat, labels, cents, temperature):
-    """쿼리↔cluster 중심 유사도의 softmax 를 소속 tool 에 부여 (zero-shot prior)."""
-    sims = q_mat @ cents.T  # (nq, k)
+def _softmax_rows(sims, temperature):
     z = sims / max(temperature, 1e-6)
     z = z - z.max(axis=1, keepdims=True)
-    probs = np.exp(z)
-    probs = probs / probs.sum(axis=1, keepdims=True)
+    p = np.exp(z)
+    return p / p.sum(axis=1, keepdims=True)
+
+
+def centroid_prior(q_mat, labels, cents, temperature):
+    """쿼리↔cluster 중심 유사도의 softmax 를 소속 tool 에 부여 (mean-pooling 변형)."""
+    probs = _softmax_rows(q_mat @ cents.T, temperature)
     return probs[:, labels].astype(np.float32)  # (nq, n_tools)
+
+
+def cluster_max_prior(q_mat, tool_vecs, labels, k, temperature):
+    """max-pooling 변형 (cluster-max smoothing).
+
+    query→cluster 점수 = cluster 멤버 tool 들의 전 벡터(설명1+예시5)에 대한 **max** cosine
+    (= cluster 내 최고 dense_multi 점수). centroid(평균)와 달리 비단조 pooling 이라,
+    자기 점수는 낮지만 뜨거운 cluster 에 속한 tool 이 boost 를 받는다 — 형제 구출 메커니즘.
+    """
+    nq, n_tools = q_mat.shape[0], tool_vecs.shape[0]
+    flat = tool_vecs.reshape(n_tools * tool_vecs.shape[1], -1)
+    per_tool = (q_mat @ flat.T).reshape(nq, n_tools, tool_vecs.shape[1]).max(axis=2)
+    cs = np.full((nq, k), -1e9, dtype=np.float32)
+    for c in range(k):
+        idx = np.where(labels == c)[0]
+        if len(idx):
+            cs[:, c] = per_tool[:, idx].max(axis=1)
+    probs = _softmax_rows(cs, temperature)
+    return probs[:, labels].astype(np.float32)
+
+
+def build_flat_vectors(tool_vecs):
+    """(n_tools, 6, d) → 빈 슬롯 제거한 (N, d) + 소유 tool 인덱스 (N,)."""
+    n_tools, n_vec, d = tool_vecs.shape
+    flat = tool_vecs.reshape(n_tools * n_vec, d)
+    owner = np.repeat(np.arange(n_tools), n_vec)
+    keep = np.linalg.norm(flat, axis=1) > 1e-8
+    return flat[keep], owner[keep]
+
+
+def scenario_priors(q_mat, flat, owner, labels_vec, k, n_tools, gold_idx_by_q, temperature):
+    """벡터 단위(시나리오) 클러스터링 변형 — tool 이 여러 cluster 에 다중 소속.
+
+    query→cluster 점수 = cluster 멤버 벡터에 대한 max cosine (multi-vector 의 max 원리 유지).
+    tool prior = 자기 벡터들이 속한 cluster 확률의 max.
+    반환: (scenario_max prior, oracle_scenario prior — gold tool 벡터의 cluster 에 1.0)
+    """
+    nq = q_mat.shape[0]
+    sims_flat = q_mat @ flat.T  # (nq, N)
+    cs = np.full((nq, k), -1e9, dtype=np.float32)
+    for c in range(k):
+        idx = np.where(labels_vec == c)[0]
+        if len(idx):
+            cs[:, c] = sims_flat[:, idx].max(axis=1)
+    probs = _softmax_rows(cs, temperature)  # (nq, k)
+
+    # tool → 소속 cluster 집합 (다중 소속)
+    clusters_of_tool = [np.unique(labels_vec[owner == t]) for t in range(n_tools)]
+    prior = np.zeros((nq, n_tools), dtype=np.float32)
+    for t in range(n_tools):
+        if len(clusters_of_tool[t]):
+            prior[:, t] = probs[:, clusters_of_tool[t]].max(axis=1)
+
+    oracle = np.zeros((nq, n_tools), dtype=np.float32)
+    for qi, gidx in enumerate(gold_idx_by_q):
+        gclusters = set()
+        for g in gidx:
+            gclusters.update(clusters_of_tool[g].tolist())
+        if gclusters:
+            gc = np.array(sorted(gclusters))
+            member = np.array([bool(np.intersect1d(clusters_of_tool[t], gc).size)
+                               for t in range(n_tools)])
+            oracle[qi] = member.astype(np.float32)
+    return prior, oracle
 
 
 def fused_recall(queries, tool_ids, sem_scores, prior_mat, gold_by_q, fold_of, fcfg, ks):
@@ -169,6 +236,11 @@ def run(config_path):
 
     reps = tool_representations(desc_mat, tool_ex_mat)
     tool_vecs = np.concatenate([desc_mat[:, None, :], tool_ex_mat], axis=1)
+    flat, owner = build_flat_vectors(tool_vecs)
+    print(f"[cluster-ab] 시나리오(벡터 단위) 클러스터링 대상: {flat.shape[0]}개 벡터")
+    scenario_labels = {}  # ck → 벡터 단위 k-means 라벨 (split 무관, 1회 계산)
+    for ck in cluster_ks:
+        scenario_labels[ck], _ = cluster_tools(flat, ck, seed)
 
     report = {"config": {"cluster_ks": cluster_ks, "temperature": temperature, "seed": seed},
               "splits": {}}
@@ -182,13 +254,22 @@ def run(config_path):
         sem_scores = [cosine_scores_multi(q_mat[i], tool_vecs) for i in range(len(queries))]
         fold_of = assign_folds([str(q["query_id"]) for q in queries], int(fcfg["n_folds"]), seed)
 
+        idx_of = {t: i for i, t in enumerate(tool_ids)}
+        gold_idx_by_q = [[idx_of[g] for g in gold if g in idx_of] for gold in gold_by_q]
+
         entry = {"baselines": baseline_recalls(results_dir, split, ks), "clusters": {}}
         for ck in cluster_ks:
             labels, cents = cluster_tools(reps, ck, seed)
             sizes = np.bincount(labels, minlength=ck)
+            sc_prior, sc_oracle = scenario_priors(
+                q_mat, flat, owner, scenario_labels[ck], ck, len(tool_ids),
+                gold_idx_by_q, temperature)
             variants = {
                 "oracle_cluster": oracle_cluster_prior(queries, tool_ids, labels, gold_by_q),
+                "oracle_scenario": sc_oracle,
                 "centroid": centroid_prior(q_mat, labels, cents, temperature),
+                "cluster_max": cluster_max_prior(q_mat, tool_vecs, labels, ck, temperature),
+                "scenario_max": sc_prior,
             }
             entry["clusters"][ck] = {
                 "cluster_size_mean": round(float(sizes.mean()), 2),
@@ -216,7 +297,9 @@ def run(config_path):
             if name in b:
                 print(name.ljust(34), *[f"{b[name].get(k, float('nan')):.2f}".rjust(7) for k in ks])
         for ck, ce in e["clusters"].items():
-            for vname in ("oracle_cluster", "centroid"):
+            for vname in ("oracle_cluster", "oracle_scenario", "centroid", "cluster_max", "scenario_max"):
+                if vname not in ce:
+                    continue
                 for m in FUSION:
                     label = f"k={ck} {vname} {m.replace('fusion_', '')}"
                     vals = ce[vname][m]
@@ -265,6 +348,28 @@ def _smoke():
         for j in range(n_tools):
             if labels[i] == labels[j]:
                 assert abs(cp[0][i] - cp[0][j]) < 1e-6
+
+    # max-pooling 변형: 형상 + 같은 cluster 공유 + centroid 와 다른 분포
+    tool_vecs = np.concatenate([desc[:, None, :], ex], axis=1)
+    cmp_ = cluster_max_prior(q_mat, tool_vecs, labels, 6, temperature=0.05)
+    assert cmp_.shape == (nq, n_tools) and (cmp_ >= 0).all()
+    for i in range(n_tools):
+        for j in range(n_tools):
+            if labels[i] == labels[j]:
+                assert abs(cmp_[0][i] - cmp_[0][j]) < 1e-6
+    assert not np.allclose(cmp_, cp), "max 와 mean pooling 이 동일하면 변형 의미 없음"
+
+    # 시나리오(벡터 단위) 변형: 빈 슬롯 제거 + 다중 소속 + oracle 에 gold 포함
+    flat, owner = build_flat_vectors(tool_vecs)
+    assert flat.shape[0] == n_tools * 6 - np.sum([np.linalg.norm(ex[i, j]) <= 1e-8
+                                                  for i in range(n_tools) for j in range(5)])
+    labels_vec, _ = cluster_tools(flat, 8, seed=42)
+    gold_idx = [[tool_ids.index(g) for g in gs] for gs in gold_by_q]
+    sp, so = scenario_priors(q_mat, flat, owner, labels_vec, 8, n_tools, gold_idx, 0.05)
+    assert sp.shape == (nq, n_tools) and so.shape == (nq, n_tools)
+    for qi in range(nq):
+        for g in gold_idx[qi]:
+            assert so[qi][g] == 1.0, "oracle_scenario 는 gold tool 자신을 반드시 포함해야 함"
 
     fcfg = {"alpha_grid": [0.3, 0.7], "beta_grid": [0.1, 0.5], "lambda_grid": [0.1, 0.5],
             "epsilon": 0.05, "n_folds": 3, "norm_method": "zscore"}
