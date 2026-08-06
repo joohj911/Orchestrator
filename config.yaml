@@ -167,3 +167,16 @@ query_split:
   # 추가 실험: 규칙 기반 멀티 인텐트 분해 (ToolQP 계열 아이디어, LLM 0).
   # scripts/experiment_query_split.py 가 사용.
   min_words: 4                    # 이보다 짧은 세그먼트는 앞 세그먼트에 병합 (파편화 방지)
+
+prior_diagnostics:
+  # 재계측: 무학습 prior null 들이 '정보 없음'인지 'Recall_all@K 순증 0'인지 구분.
+  # scripts/diagnose_prior_effect.py 가 사용. GPU 불필요.
+  cluster_ks: [42, 128]           # 진단할 클러스터 수 (전체 4종은 과함 — 대표 2종)
+  beta_sweep:   [0.0, 0.05, 0.1, 0.2, 0.3, 0.5, 0.75, 1.0, 1.5, 2.0]
+                                  # α=1 고정 강제 스윕. 첫 값 0 필수 (dense_multi 앵커).
+                                  # 실그리드 도달 범위 β/α = 0.143~2.33 을 포괄.
+  lambda_sweep: [0.0, 0.1, 0.25, 0.5, 1.0, 2.0]   # 첫 값 0 필수 (p^0=1 → dense_multi)
+  alpha_fixed: 1.0                # 랭킹은 β/α 비율에만 의존하므로 α 고정 후 β 만 스윕
+  peak_margin: 0.03               # 앵커 대비 이 이상 오르면 '봉우리'(선택 분산) 판정.
+                                  # 100 쿼리에서 3건 = 이항 SE(≈0.05) 이내지만, 곡선 형태와
+                                  # 부호 분해를 함께 보므로 탐지 기준으로 사용 (확증 아님)
