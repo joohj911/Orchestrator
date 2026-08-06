@@ -168,6 +168,22 @@ query_split:
   # scripts/experiment_query_split.py 가 사용.
   min_words: 4                    # 이보다 짧은 세그먼트는 앞 세그먼트에 병합 (파편화 방지)
 
+rank_prior:
+  # classifier 대체 재검정: 순위 기반 shaping 으로 prior 동적 범위를 보장.
+  # scripts/experiment_rank_prior.py 가 사용. 진단에서 기존 prior 엔트로피가 0.98~0.996
+  # (거의 균등)이라 검정 자체가 불가였음 — 순위 기반은 코사인 압축과 무관하게 범위 확보.
+  cluster_ks: [128, 42]           # oracle 상한이 k=128 에서 크게 높음 (I2 0.90 / I3 0.93)
+  scorers: ["centroid", "cluster_max", "topm_mean"]
+  topm: 3                         # topm_mean: cluster 상위 m개 멤버 평균 (크기 정규화)
+  shapes:                         # shape 파라미터도 fold train 에서 선택 (누출 없음)
+    softmax:   [0.01, 0.05]       # 대조군 — 기존 실패 설정 포함
+    rank_pow:  [0.5, 1.0, 2.0]    # prior ∝ 1/r^p
+    rank_exp:  [2.0, 5.0, 10.0]   # prior ∝ exp(-(r-1)/tau)
+    topk_mass: [3, 5, 10]         # 상위 k개 cluster 만 질량 (하드 선택 — mult+eps 효과의 명시판)
+  include_zero: true              # beta=0 / lambda=0 을 그리드에 추가.
+                                  # 근거: I3 에서 classifier 가 prior 를 끌 수 없어 0.47→0.43
+                                  # 손해를 봤다. 대체 후보는 '무해'가 최소 조건이므로 필수.
+
 prior_diagnostics:
   # 재계측: 무학습 prior null 들이 '정보 없음'인지 'Recall_all@K 순증 0'인지 구분.
   # scripts/diagnose_prior_effect.py 가 사용. GPU 불필요.
