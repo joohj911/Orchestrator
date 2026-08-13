@@ -166,7 +166,12 @@ contrastive:
 query_split:
   # 추가 실험: 규칙 기반 멀티 인텐트 분해 (ToolQP 계열 아이디어, LLM 0).
   # scripts/experiment_query_split.py 가 사용.
-  min_words: 4                    # 이보다 짧은 세그먼트는 앞 세그먼트에 병합 (파편화 방지)
+  # 다국어 대비(사람 결정): 분리는 문장 종결 부호만 (ASCII [.!?] + 전각 [。！？]),
+  # 병합 판단은 단어 수가 아니라 문자 수 — CJK 는 공백 분리가 없어 단어 수가 정의 불가.
+  # 영어 접속사 분리는 배포 기본에서 빼고 sent_conj 변형으로만 측정한다.
+  min_chars: 12                   # 이보다 짧은 세그먼트는 앞 세그먼트에 병합 (과분해 교정).
+                                  # 12 = 영어 실제 절("Also, check the weather" 23자)은 남기고
+                                  # 파편("OK?" 3자)만 흡수하는 경계.
 
 rank_prior:
   # classifier 대체 재검정: 순위 기반 shaping 으로 prior 동적 범위를 보장.
